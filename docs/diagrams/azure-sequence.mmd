@@ -1,0 +1,41 @@
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant FD as "Front Door / WAF"
+    participant AP as APIM
+    participant LC as "LangChain Middleware"
+    participant CS as "Content Safety SDK"
+    participant PII as "Language PII SDK"
+    participant AG as "Foundry Agent"
+    participant M as "GPT-5.2 + RAI policy"
+    participant EV as "Evaluation SDK"
+    participant LA as "Log Analytics"
+
+    U->>FD: HTTPS request
+    FD->>AP: Forward WAF passed
+    AP->>AP: validate-jwt + rate-limit
+    AP->>PII: PII pre-scan inbound
+    PII-->>AP: redacted text + entities
+    AP->>LC: Forward + x-policy-id header
+    LC->>CS: analyze_text input + detect_jailbreak
+    CS-->>LC: severities + jailbreak flag
+    LC->>PII: recognize_pii_entities domain=phi
+    PII-->>LC: PII / PHI entities -> redact
+    LC->>AG: invoke agent clean prompt
+    AG->>M: model call under RAI policy
+    Note over M: L5 RAI + L6 defaults + L7 blocklists + protected-material run automatically
+    M-->>AG: response filtered
+    AG-->>LC: response
+    LC->>CS: analyze_text output + detect_groundedness + detect_protected_material
+    CS-->>LC: pass / block
+    LC->>PII: recognize_pii_entities output
+    PII-->>LC: redact PII / PHI in output
+    LC-->>AP: clean response
+    AP-->>U: response
+    par Telemetry
+        AP->>LA: APIM logs
+        LC->>LA: middleware spans OTel
+        AG->>LA: agent traces
+        M->>LA: RAI filter events
+    end
+    Note over EV,LA: Nightly azure-ai-evaluation runs ContentSafetyEvaluator IndirectAttackEvaluator GroundednessEvaluator ProtectedMaterialEvaluator against the 64-case adversarial harness

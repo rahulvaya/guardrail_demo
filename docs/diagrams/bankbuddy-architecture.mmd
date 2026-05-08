@@ -1,0 +1,122 @@
+flowchart TB
+    %% =====================================================================
+    %% BankBuddy - Complete System Architecture
+    %% Generated from docker-compose.yml + service code
+    %% =====================================================================
+
+    User(["Browser / End User<br/>alice"]):::ext
+
+    subgraph EDGE["Edge Network (host-published)"]
+        direction TB
+        UI["ui<br/>FastAPI + React (Vite)<br/>:8090 -> 8080<br/>services/ui"]:::svc
+        API["api (BFF)<br/>FastAPI<br/>:8001 -> 8000<br/>services/api"]:::svc
+    end
+
+    subgraph INTERNAL["Internal Network (no host ports)"]
+        direction TB
+
+        subgraph AGENT_BOX["agent - LangGraph orchestrator (services/agent)"]
+            direction TB
+            AGENT["FastAPI app<br/>:8100"]:::svc
+            GRAPH["LangGraph<br/>plan -> guard -> tools -> guard -> reply"]:::comp
+            LLMC["LLM client<br/>app/llm/<br/>(LiteLLM provider)"]:::comp
+            TOOLS["Banking tools<br/>app/tools/<br/>accounts, cards, transfers,<br/>ATMs, loans"]:::comp
+            GRC["Guardrails client<br/>guardrails_client.py<br/>X-Internal-Token"]:::comp
+        end
+
+        subgraph GR_BOX["guardrails - policy enforcement (services/guardrails)"]
+            direction TB
+            GR_API["FastAPI<br/>:8001<br/>/v1/check (input/output/tool_output)"]:::svc
+            GR_AUTH["Bearer auth<br/>GUARDRAILS_INTERNAL_TOKEN"]:::comp
+            GR_PIPE["Pipeline<br/>core/pipeline.py<br/>+ registry.py"]:::comp
+            GR_POLICY["Policy YAML<br/>policies/bankbuddy-default.yaml"]:::comp
+
+            subgraph GUARDS["Guards (core/guards/)"]
+                direction LR
+                G1["pii-detect<br/>(regex)"]:::guard
+                G2["banned-substrings"]:::guard
+                G3["prompt-injection"]:::guard
+                G4["token-limit"]:::guard
+                G5["banking-relevance<br/>(scope)"]:::guard
+                G6["secret-leak"]:::guard
+                G7["competitor-mentions"]:::guard
+                G8["toxicity"]:::guard
+                G9["output-pii-redact"]:::guard
+                GA["azure-content-safety<br/>Hate / SelfHarm /<br/>Sexual / Violence /<br/>PromptShield"]:::azureguard
+                GB["azure-pii-detection<br/>(Azure AI Language)"]:::azureguard
+            end
+        end
+
+        MOCK["mock-bank<br/>FastAPI + SQLAlchemy<br/>:8200<br/>services/mock-bank"]:::svc
+        PG[("postgres:16<br/>schemas: app, agent_memory, bank<br/>:5432")]:::db
+    end
+
+    subgraph SHARED["shared/ (bankbuddy_shared) - DTOs + ABCs"]
+        direction LR
+        SH_INT["interfaces/<br/>auth, agent, llm,<br/>guardrails, tools"]:::lib
+        SH_CON["contracts/<br/>chat, agent, principal,<br/>guardrails"]:::lib
+    end
+
+    subgraph AZURE["Azure (External)"]
+        direction TB
+        AOAI["Azure OpenAI<br/>chat completions<br/>(via LiteLLM)"]:::azure
+        ACS["Azure AI<br/>Content Safety<br/>text:analyze<br/>text:shieldPrompt"]:::azure
+        ALANG["Azure AI Language<br/>:analyze-text<br/>(PII Entity Recognition)"]:::azure
+        ENTRA["Microsoft Entra ID<br/>tenant 16b3c013-...<br/>OIDC + AAD tokens"]:::azure
+    end
+
+    subgraph DEV["Developer Tooling"]
+        direction LR
+        REFRESH["tools/refresh-aad-token.ps1<br/>az account get-access-token<br/>-> AZURE_*_AAD_TOKEN env"]:::dev
+        SMOKE["tests/smoke_*.py<br/>infra/scripts/smoke_test.py"]:::dev
+    end
+
+    %% --------- request flow ---------
+    User -->|HTTPS :8090| UI
+    UI -->|REST /api/chat| API
+    API -->|"X-Internal-Token<br/>POST /agent/invoke"| AGENT
+
+    AGENT --> GRAPH
+    GRAPH -->|input check| GRC
+    GRC -->|"Bearer GUARDRAILS_INTERNAL_TOKEN<br/>POST /v1/check"| GR_API
+    GR_API --> GR_AUTH --> GR_PIPE
+    GR_POLICY -.->|loads stages| GR_PIPE
+    GR_PIPE --> GUARDS
+
+    GA -->|HTTPS + AAD bearer| ACS
+    GB -->|HTTPS + AAD bearer| ALANG
+
+    GRAPH -->|tool calls| TOOLS
+    TOOLS -->|REST| MOCK
+    MOCK -->|SQLAlchemy| PG
+    GRAPH -->|tool_output check| GRC
+    GRAPH -->|LLM completion| LLMC
+    LLMC -->|HTTPS + AAD bearer| AOAI
+    GRAPH -->|output check| GRC
+
+    %% --------- session / auth ---------
+    API -.->|local-dev / OIDC| ENTRA
+
+    %% --------- shared lib usage ---------
+    UI -.-> SHARED
+    API -.-> SHARED
+    AGENT -.-> SHARED
+    GR_API -.-> SHARED
+    MOCK -.-> SHARED
+
+    %% --------- dev tooling ---------
+    REFRESH -.->|exports tokens<br/>then docker compose up| AGENT
+    REFRESH -.->|exports tokens| GR_API
+    SMOKE -.-> API
+    SMOKE -.-> GR_API
+
+    %% --------- styles ---------
+    classDef ext fill:#fef3c7,stroke:#b45309,color:#7c2d12
+    classDef svc fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
+    classDef comp fill:#eff6ff,stroke:#3b82f6,color:#1e3a8a
+    classDef guard fill:#dcfce7,stroke:#166534,color:#14532d
+    classDef azureguard fill:#cffafe,stroke:#0e7490,color:#164e63
+    classDef azure fill:#e0e7ff,stroke:#4338ca,color:#312e81
+    classDef db fill:#fce7f3,stroke:#be185d,color:#831843
+    classDef lib fill:#f1f5f9,stroke:#475569,color:#0f172a
+    classDef dev fill:#fef9c3,stroke:#a16207,color:#713f12

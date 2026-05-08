@@ -1,0 +1,3 @@
+# shared - kept minimal; the package is consumed via local path install
+# (each service Dockerfile does `pip install -e ./shared`).
+pydantic>=2.7.0

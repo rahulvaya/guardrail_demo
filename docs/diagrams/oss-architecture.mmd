@@ -1,0 +1,108 @@
+flowchart TB
+    User["Client App / User"]:::ext
+
+    subgraph L1["L1 - Edge and Identity"]
+        WAF["ModSecurity + OWASP CRS"]
+        OIDC["Keycloak OIDC"]
+    end
+
+    subgraph L2["L2 - API Gateway and LLM Gateway"]
+        KONG["Kong / APISIX / Envoy<br/>rate-limit, JWT, header injection"]
+        LITE["LiteLLM Proxy<br/>provider-agnostic LLM routing<br/>fallback, retries, cost tracking"]
+        APIPII["Sidecar PII pre-scan<br/>Presidio"]
+    end
+
+    subgraph L3["L3 - Application and Middleware - Python"]
+        LC["LangChain / LangGraph<br/>orchestrator"]
+        NEMO["NeMo Guardrails<br/>input + dialog + execution rails<br/>Colang config"]
+        LLMG["LLM Guard scanners<br/>PromptInjection, BanSubstrings,<br/>BanTopics, Secrets, TokenLimit"]
+        PRES["Presidio Analyzer + Anonymizer<br/>PII / PHI redaction<br/>+ medspaCy clinical"]
+        DETOX["Detoxify classifier"]
+        TOOL["Pydantic tool schema +<br/>NeMo execution rails"]
+    end
+
+    subgraph L4L5["L4 + L5 - Local Safety Models"]
+        LG["Llama Guard 3 - 8B<br/>served by vLLM"]
+        PG["Prompt-Guard 86M<br/>jailbreak classifier"]
+        SG["ShieldGemma optional"]
+    end
+
+    subgraph MODEL["Model layer - any provider"]
+        VLLM["Self-hosted: vLLM / Ollama / TGI"]
+        EXT["Or external API: OpenAI /<br/>Anthropic / Bedrock / Vertex /<br/>Azure OpenAI / Mistral"]
+    end
+
+    subgraph L8["L8 - Output Post-processing"]
+        GAI["Guardrails-AI validators<br/>schema + provenance + competitor-check"]
+        LLMG2["LLM Guard output scanners<br/>NoRefusal, Bias, Toxicity,<br/>Sensitive, FactualConsistency,<br/>MaliciousURLs"]
+        RAG["RAGAS / DeepEval<br/>groundedness + faithfulness"]
+        PRES2["Presidio output redaction"]
+    end
+
+    subgraph CC["Cross-cutting"]
+        OPA["OPA + Rego<br/>policy-as-code"]
+        VAULT["HashiCorp Vault<br/>secrets"]
+        OTEL["OpenTelemetry Collector"]
+        TEMPO["Grafana Tempo - traces"]
+        LOKI["Grafana Loki - logs"]
+        PROM["Prometheus - metrics"]
+        GRAF["Grafana dashboards"]
+        LF["Langfuse / Phoenix<br/>LLM-specific tracing"]
+        MINIO["MinIO S3-compatible<br/>archive 7y"]
+        EVAL["promptfoo + garak + PyRIT<br/>+ DeepEval - CI red-team"]
+    end
+
+    User --> WAF
+    WAF --> OIDC
+    OIDC --> KONG
+    KONG --> APIPII
+    APIPII --> LC
+    LC --> NEMO
+    NEMO --> LLMG
+    NEMO --> PRES
+    LLMG --> DETOX
+    NEMO --> LG
+    NEMO --> PG
+    LG --> SG
+    NEMO --> TOOL
+    TOOL --> LITE
+    LITE --> VLLM
+    LITE --> EXT
+    VLLM --> GAI
+    EXT --> GAI
+    GAI --> LLMG2
+    LLMG2 --> RAG
+    RAG --> PRES2
+    PRES2 --> KONG
+    KONG --> User
+
+    OPA -.->|enforces| KONG
+    OPA -.->|enforces| NEMO
+    OPA -.->|enforces| LITE
+    VAULT -.->|secrets| LC
+    VAULT -.->|secrets| LITE
+    OTEL --> TEMPO
+    OTEL --> LOKI
+    OTEL --> PROM
+    TEMPO --> GRAF
+    LOKI --> GRAF
+    PROM --> GRAF
+    LC -.->|OTel| OTEL
+    KONG -.->|OTel| OTEL
+    LITE -.->|OTel| OTEL
+    LC -.->|traces| LF
+    LITE -.->|traces| LF
+    LOKI --> MINIO
+    EVAL -.->|validates| NEMO
+    EVAL -.->|validates| VLLM
+
+    classDef ext fill:#fef3c7,stroke:#b45309,color:#7c2d12
+    classDef gr fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
+    classDef pii fill:#dcfce7,stroke:#15803d,color:#14532d
+    classDef model fill:#fce7f3,stroke:#be185d,color:#831843
+    classDef cc fill:#f3f4f6,stroke:#374151,color:#111827
+
+    class NEMO,LLMG,LLMG2,GAI,DETOX,LG,PG,SG,RAG gr
+    class PRES,PRES2,APIPII pii
+    class VLLM,EXT,LITE model
+    class OPA,VAULT,OTEL,TEMPO,LOKI,PROM,GRAF,LF,MINIO,EVAL cc

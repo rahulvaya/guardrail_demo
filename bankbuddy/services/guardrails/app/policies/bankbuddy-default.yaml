@@ -1,0 +1,162 @@
+# =============================================================================
+# Default BankBuddy retail-banking policy.
+#
+# HOW TO ENABLE / DISABLE A GUARD
+# -------------------------------
+# Every guard below has `enabled: true|false`. Flip it and recreate the
+# guardrails container:
+#
+#     docker compose up -d --force-recreate guardrails
+#
+# Order matters per stage: cheap deterministic checks first, Azure managed
+# checks next, custom scope/output checks last.
+#
+# Guard names must match the canonical hyphenated form registered in
+# services/guardrails/app/core/guards/*.py. Run
+#   docker exec bankbuddy-guardrails python -c "from app.core import guards; from app.core.registry import registered_names; print(registered_names())"
+# to list them.
+# =============================================================================
+
+id: bankbuddy-default
+description: BankBuddy retail banking assistant - default policy
+
+# ---------------------------------------------------------------------------
+# INPUT pipeline (runs on every user message before the LLM)
+# ---------------------------------------------------------------------------
+input:
+  # Cheap DoS guard. Reject obviously oversized inputs.
+  - token-limit:
+      enabled: false
+      max_chars: 8000
+
+  # Hard blocklist of phrases (fraud red-flags, prompt-override tells).
+  - banned-substrings:
+      enabled: false
+      # phrases: ["wire all funds", "ignore previous instructions"]   # uses defaults if omitted
+
+  # Heuristic jailbreak / role-override detector (no GPU required).
+  - prompt-injection:
+      enabled: false
+
+  # Local regex PII detector (no cloud call). Catches SSN, credit-card,
+  # email, US phone, IPv4, IBAN deterministically. Runs alongside the
+  # Azure guard so values that fall below Azure's confidence threshold
+  # (e.g. 10 raw digits like "1234567890") still get masked.
+  - pii-detect:
+      enabled: true
+      mode: block
+
+  # Azure AI Content Safety (hate, self-harm, sexual, violence, prompt-shield).
+  # severity_threshold=2 blocks any harm category at "low" or above
+  # (FourSeverityLevels: 0=safe, 2=low, 4=medium, 6=high).
+  - azure-content-safety:
+      enabled: true
+      severity_threshold: 2
+
+  # Azure AI Language PII detection.
+  - azure-pii-detection:
+      enabled: true
+      mode: block
+      # Lower threshold so borderline phone/SSN hits aren't dropped.
+      min_confidence: 0.3
+      # PersonType (job titles like "holder", "customer") is noisy.
+      exclude_categories: ["PersonType"]
+
+  # Custom scope guard - keep BankBuddy on banking topics.
+  - banking-relevance:
+      enabled: true
+      min_ratio: 0.05
+      min_length: 20
+      refusal_message: >-
+        I can only help with banking questions - accounts, cards,
+        transfers, loans, ATMs.
+
+# ---------------------------------------------------------------------------
+# OUTPUT pipeline (runs on every assistant message before it leaves the agent)
+# ---------------------------------------------------------------------------
+output:
+  - azure-content-safety:
+      enabled: true
+      severity_threshold: 2
+
+  - azure-pii-detection:
+      enabled: true
+      mode: sanitize
+      min_confidence: 0.3
+      exclude_categories: ["PersonType"]
+
+  # Local regex PII fallback on assistant replies (SSN/card/phone/email).
+  - pii-detect:
+      enabled: true
+      mode: sanitize
+
+  # Mask PII in the assistant response before it leaves the agent.
+  - output-pii-redact:
+      enabled: false
+
+  # Refuse to leak secrets / API keys / connection strings.
+  - secret-leak:
+      enabled: true
+
+  # Strip or refuse competitor names in answers.
+  - competitor-mentions:
+      enabled: false
+
+  # Toxicity classifier on outgoing text.
+  - toxicity:
+      enabled: false
+
+# ---------------------------------------------------------------------------
+# TOOL_OUTPUT pipeline (runs on EVERY tool result before it is fed back to the
+# LLM as a `role: "tool"` message). Defends against:
+#   - prompt-injection text inside tool data (e.g. malicious memo fields)
+#   - PII / SSN / card numbers leaking from downstream services
+#   - oversized payloads blowing the LLM context window
+#   - leaked secrets / API keys / connection strings
+#
+# A BLOCK here does NOT abort the whole conversation. The agent replaces
+# the offending tool result with a sanitized error string and lets the LLM
+# react ("the tool returned data that was withheld by policy"). This keeps
+# the loop responsive while preventing dirty data from reaching the model.
+# ---------------------------------------------------------------------------
+tool_output:
+  - token-limit:
+      enabled: true
+      max_chars: 16000
+
+  - banned-substrings:
+      enabled: false
+
+  - prompt-injection:
+      enabled: true
+
+  - pii-detect:
+      enabled: true
+      mode: sanitize
+
+  - azure-content-safety:
+      enabled: true
+      severity_threshold: 2
+
+  - azure-pii-detection:
+      enabled: true
+      mode: sanitize
+      # PersonType (job titles like "holder", "customer", "manager") is
+      # noisy on banking JSON. Skip it and only act on high-confidence hits.
+      exclude_categories: ["PersonType"]
+      min_confidence: 0.5
+
+  - banking-relevance:
+      enabled: true
+
+  - output-pii-redact:
+      enabled: false
+
+  - secret-leak:
+      enabled: true
+
+  - competitor-mentions:
+      enabled: false
+
+  - toxicity:
+      enabled: true

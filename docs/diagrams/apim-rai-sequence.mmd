@@ -1,0 +1,38 @@
+sequenceDiagram
+    autonumber
+    participant U as Tenant-A client
+    participant FD as Front Door + WAF
+    participant AP as APIM
+    participant LA as Language PII
+    participant AG as Agent (LangChain)
+    participant CS as Content Safety
+    participant M as AOAI gpt-4o-customer RAI=strict-production-v1
+    participant LAW as Log Analytics
+
+    U->>FD: HTTPS POST /chat
+    FD->>AP: forward (WAF passed)
+    AP->>AP: validate-jwt (Entra)
+    AP->>AP: rate-limit + quota
+    AP->>AP: choose policy from JWT.role=customer
+    AP->>AP: set-header x-policy-id=strict-production-v1
+    AP->>LA: send-request: PII pre-scan
+    LA-->>AP: redacted text + entities
+    AP->>AP: validate header allow-list
+    AP->>AG: forward + headers (x-policy-id, request-id)
+    AG->>CS: analyze_text(input) + detect_jailbreak
+    CS-->>AG: severities + jailbreak score
+    Note over AG: BLOCK if severity >= Low (strict-production threshold)
+    AG->>M: chat.completions ?rai-policy=strict-production-v1
+    Note over M: L5 RAI thresholds, L6 default filters, L7 fin-strict blocklist (all run automatically)
+    M-->>AG: response (or content_filter finish_reason)
+    AG->>CS: analyze_text(output) + detect_groundedness + detect_protected_material
+    CS-->>AG: pass / block + ungrounded spans
+    AG->>LA: recognize_pii_entities(output)
+    LA-->>AG: redact PII
+    AG-->>AP: clean response
+    AP-->>U: 200 OK
+    par Telemetry (parallel)
+      AP->>LAW: APIM logs
+      AG->>LAW: OTel spans (x-policy-id, per-guard decision)
+      M->>LAW: RAIContentFilterEvents
+    end

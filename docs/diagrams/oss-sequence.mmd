@@ -1,0 +1,47 @@
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant W as "ModSecurity WAF"
+    participant K as "Kong Gateway"
+    participant N as "NeMo Guardrails"
+    participant LG as "LLM Guard scanners"
+    participant P as Presidio
+    participant LL as "Llama Guard 3 vLLM"
+    participant LT as "LiteLLM Proxy"
+    participant M as "LLM provider"
+    participant GA as "Guardrails-AI"
+    participant R as RAGAS
+    participant LF as "Langfuse + OTel"
+
+    U->>W: HTTPS request
+    W->>K: passed OWASP CRS
+    K->>K: validate JWT Keycloak + rate-limit
+    K->>P: PII pre-scan inbound
+    P-->>K: redacted text + entities
+    K->>N: forward + x-policy-id header
+    N->>LG: input scanners PromptInjection + BanSubstrings + Secrets
+    LG-->>N: pass / block
+    N->>LL: Llama Guard input check
+    LL-->>N: safe / unsafe + category
+    N->>P: PII / PHI redaction final
+    P-->>N: clean prompt
+    N->>LT: invoke model via OpenAI-compatible API
+    LT->>M: route to provider with fallback
+    M-->>LT: completion
+    LT-->>N: completion
+    N->>LL: Llama Guard output check
+    LL-->>N: safe / unsafe
+    N->>LG: output scanners Toxicity + Bias + Sensitive + MaliciousURLs
+    N->>GA: schema + provenance validators
+    N->>R: groundedness + faithfulness against retrieved docs
+    R-->>N: score + pass/fail
+    N->>P: PII / PHI redaction outbound
+    P-->>N: clean response
+    N-->>K: response
+    K-->>U: response
+    par Telemetry
+        K->>LF: gateway span
+        N->>LF: rail decisions
+        LT->>LF: model + cost + latency
+    end
+    Note over LF: Nightly CI runs promptfoo + garak + PyRIT + DeepEval against the 64-case adversarial harness

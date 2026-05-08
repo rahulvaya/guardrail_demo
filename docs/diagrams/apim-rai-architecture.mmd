@@ -1,0 +1,97 @@
+flowchart TB
+    classDef client fill:#fef3c7,stroke:#b45309,color:#7c2d12
+    classDef apim fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
+    classDef agent fill:#ede9fe,stroke:#6d28d9,color:#3b0764
+    classDef rai fill:#fce7f3,stroke:#be185d,color:#831843
+    classDef cs fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
+    classDef cfg fill:#f1f5f9,stroke:#475569,color:#0f172a
+    classDef obs fill:#f3f4f6,stroke:#374151,color:#111827
+
+    A1["Tenant-A client<br/>(public app)<br/>JWT role=customer"]:::client
+    A2["Tenant-B client<br/>(researcher)<br/>JWT role=researcher"]:::client
+
+    FD["Azure Front Door + WAF<br/>OWASP rules, TLS, geo-block"]:::apim
+
+    subgraph APIM["Azure API Management - single ingress for all tenants"]
+      direction TB
+      P1["1) validate-jwt<br/>(Entra issuer + audience)"]:::apim
+      P2["2) rate-limit-by-key<br/>+ quota by subscription"]:::apim
+      P3["3) choose on JWT claims<br/>role=customer  -> strict-production-v1<br/>role=internal -> moderate-internal-v1<br/>role=researcher -> permissive-research-v1"]:::apim
+      P4["4) set-header<br/>x-policy-id: resolved<br/>exists-action=override<br/>(client value is discarded)"]:::apim
+      P5["5) send-request -> Azure AI Language PII<br/>(inbound pre-scan / pre-redact)"]:::apim
+      P6["6) Validate header against allow-list<br/>unknown id -> 403"]:::apim
+      P1 --> P2 --> P3 --> P4 --> P5 --> P6
+    end
+    class APIM apim
+
+    subgraph APP["L3 - Agent service (Container Apps / App Service)"]
+      direction TB
+      M1["LangChain middleware<br/>reads x-policy-id<br/>selects deployment+RAI mapping"]:::agent
+      M2["AzureContentModerationMiddleware<br/>analyze_text + detect_jailbreak (input)"]:::agent
+      M3["Tool allow-list +<br/>function-call schema check"]:::agent
+      M4["AzureContentModerationMiddleware<br/>analyze_text + detect_groundedness +<br/>detect_protected_material (output)"]:::agent
+      M5["PII redaction on output<br/>recognize_pii_entities"]:::agent
+      M1 --> M2 --> M3
+      M4 --> M5
+    end
+
+    subgraph AOAI["Azure OpenAI / Foundry deployment"]
+      direction TB
+      D1["Deployment: gpt-4o-customer<br/>raiPolicyName=strict-production-v1"]:::rai
+      D2["Deployment: gpt-4o-internal<br/>raiPolicyName=moderate-internal-v1"]:::rai
+      D3["Deployment: gpt-4o-research<br/>raiPolicyName=permissive-research-v1"]:::rai
+
+      subgraph RAIENG["RAI engine - runs automatically on every model call"]
+        direction TB
+        L5["L5 Named RAI policy<br/>severity thresholds:<br/>Hate / Sexual / Violence / Self-harm<br/>Prompt-Shield (direct + indirect)<br/>Protected-material text + code"]:::cs
+        L6["L6 Microsoft default filters<br/>(always-on baseline)"]:::cs
+        L7["L7 Custom blocklists<br/>fin-strict / fin-internal / fin-research<br/>(SSN, account#, regulated phrases,<br/>competitor names, codenames)"]:::cs
+        L5 --> L6 --> L7
+      end
+
+      D1 --> RAIENG
+      D2 --> RAIENG
+      D3 --> RAIENG
+    end
+
+    subgraph CFG["Control plane - policy-as-code"]
+      direction TB
+      C1["Bicep: rai-policies.bicep<br/>Microsoft.CognitiveServices/<br/>accounts/raiPolicies@2024-10-01"]:::cfg
+      C2["config/rai-mapping.yaml<br/>deployment -> policy"]:::cfg
+      C3["config/blocklists/*.csv<br/>PR-reviewed by Compliance"]:::cfg
+      C4["Azure Policy<br/>'deployment must reference<br/>approved RAI policy'"]:::cfg
+      C5["BlocklistClient sync job<br/>(Azure Function, scheduled)"]:::cfg
+      C1 -. deploys .-> RAIENG
+      C2 -. assigns .-> D1
+      C2 -. assigns .-> D2
+      C2 -. assigns .-> D3
+      C3 --> C5
+      C5 -. updates .-> L7
+      C4 -. enforces .-> RAIENG
+    end
+
+    subgraph OBS["Cross-cutting - telemetry + audit"]
+      direction TB
+      O1["Log Analytics workspace<br/>law-aiagents-env<br/>tables: AzureDiagnostics,<br/>AOAIRequestResponse,<br/>RAIContentFilterEvents,<br/>AppGuardrailEvents"]:::obs
+      O2["App Insights<br/>OTel spans tagged<br/>x-policy-id, request-id, tenant-id"]:::obs
+      O3["ADLS Gen2 archive<br/>7-year retention"]:::obs
+      O4["Defender for Cloud<br/>AI workload alerts"]:::obs
+      O1 --> O3
+    end
+
+    A1 --> FD
+    A2 --> FD
+    FD --> P1
+    P6 --> M1
+    M3 -- "POST /chat/completions<br/>?rai-policy=x-policy-id" --> D1
+    M3 -. "(researcher path)" .-> D3
+    RAIENG -- "filtered response<br/>+ filter results" --> M4
+    M5 --> P6
+    P6 -- "200 OK + scrubbed body" --> A1
+    P6 -.-> A2
+
+    APIM -.-> O1
+    APP -.-> O2
+    AOAI -.-> O1
+    O2 --> O1
+    AOAI -.-> O4

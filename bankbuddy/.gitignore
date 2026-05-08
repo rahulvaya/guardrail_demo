@@ -1,0 +1,30 @@
+# Lock files / secrets
+.env
+*.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node / React
+services/ui/web/node_modules/
+services/ui/web/dist/
+services/ui/web/.vite/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Postgres data volume (when bind-mounted)
+infra/postgres/data/

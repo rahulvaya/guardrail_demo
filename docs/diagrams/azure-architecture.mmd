@@ -1,0 +1,99 @@
+flowchart TB
+    User["Client App / User"]:::ext
+
+    subgraph L1["L1 - Network and Identity"]
+        FD["Azure Front Door + WAF"]
+        Entra["Microsoft Entra ID<br/>azure-identity SDK"]
+    end
+
+    subgraph L2["L2 - API Management Gateway"]
+        APIM["APIM Policy XML"]
+        APIM_PII["Inbound PII pre-scan<br/>send-request to Language API"]
+        APIM_RL["Rate-limit + JWT validate<br/>Inject x-policy-id"]
+    end
+
+    subgraph L3["L3 - Application and Middleware - Python"]
+        LC["LangChain Orchestrator<br/>langchain + langchain-azure-ai"]
+        MW_IN["AzureContentModerationMiddleware<br/>INPUT"]
+        CS_IN["Azure AI Content Safety<br/>azure-ai-contentsafety<br/>analyze_text + detect_jailbreak"]
+        PII_IN["Azure AI Language PII<br/>azure-ai-textanalytics<br/>recognize_pii_entities domain=phi"]
+        PRES["Presidio fallback<br/>presidio-analyzer + anonymizer"]
+        TOOL["Tool allow-list +<br/>function-call schema check"]
+    end
+
+    subgraph L4L5["L4 + L5 - Foundry Agent and Model"]
+        AGENT["Azure AI Foundry Agent<br/>azure-ai-projects + azure-ai-agents<br/>per-agent RAI profile"]
+        RAI["Deployment RAI Policy<br/>azure-mgmt-cognitiveservices<br/>strict / moderate / permissive"]
+        MODEL["GPT-5.2 on Foundry<br/>azure-ai-inference"]
+    end
+
+    subgraph L6L7["L6 + L7 - Built-in filters and Blocklists"]
+        DEF["Default Microsoft Filters<br/>Hate / Sexual / Violence / Self-harm"]
+        BL["Custom Blocklists<br/>azure-ai-contentsafety<br/>BlocklistClient"]
+        PM["Protected Material Detection<br/>detect_text_protected_material"]
+    end
+
+    subgraph L8["L8 - Output Post-processing"]
+        MW_OUT["AzureContentModerationMiddleware<br/>OUTPUT"]
+        CS_OUT["Content Safety<br/>analyze_text on response"]
+        GROUND["Groundedness Detection<br/>detect_groundedness preview"]
+        PII_OUT["PII / PHI redaction on output<br/>recognize_pii_entities"]
+    end
+
+    subgraph CC["Cross-cutting"]
+        POL["Azure Policy<br/>policy-as-code"]
+        LAW["Log Analytics +<br/>App Insights<br/>azure-monitor-opentelemetry"]
+        ADLS["ADLS Gen2 archive<br/>7-year retention"]
+        DEF_C["Defender for Cloud<br/>AI workload protection"]
+        PUR["Microsoft Purview"]
+        EVAL["Foundry Evaluators<br/>azure-ai-evaluation<br/>CI + nightly red-team"]
+    end
+
+    User --> FD
+    FD --> Entra
+    Entra --> APIM
+    APIM --> APIM_RL
+    APIM_RL --> APIM_PII
+    APIM_PII --> LC
+    LC --> MW_IN
+    MW_IN --> CS_IN
+    MW_IN --> PII_IN
+    PII_IN -.->|fallback| PRES
+    MW_IN --> TOOL
+    TOOL --> AGENT
+    AGENT --> RAI
+    RAI --> MODEL
+    MODEL --> DEF
+    DEF --> BL
+    BL --> PM
+    PM --> MW_OUT
+    MW_OUT --> CS_OUT
+    MW_OUT --> GROUND
+    MW_OUT --> PII_OUT
+    PII_OUT --> APIM
+    APIM --> User
+
+    POL -.->|enforces| RAI
+    POL -.->|enforces| DEF
+    POL -.->|enforces| BL
+    LAW -.->|collects| APIM
+    LAW -.->|collects| LC
+    LAW -.->|collects| AGENT
+    LAW -.->|collects| MODEL
+    LAW --> ADLS
+    DEF_C -.->|monitors| AGENT
+    DEF_C -.->|monitors| MODEL
+    PUR -.->|catalogs| LAW
+    EVAL -.->|validates| AGENT
+    EVAL -.->|validates| MODEL
+
+    classDef ext fill:#fef3c7,stroke:#b45309,color:#7c2d12
+    classDef cs fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
+    classDef pii fill:#dcfce7,stroke:#15803d,color:#14532d
+    classDef rai fill:#fce7f3,stroke:#be185d,color:#831843
+    classDef cc fill:#f3f4f6,stroke:#374151,color:#111827
+
+    class CS_IN,CS_OUT,BL,PM,GROUND,MW_IN,MW_OUT cs
+    class PII_IN,PII_OUT,PRES,APIM_PII pii
+    class AGENT,RAI,MODEL,DEF rai
+    class POL,LAW,ADLS,DEF_C,PUR,EVAL cc

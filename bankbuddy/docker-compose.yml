@@ -1,0 +1,187 @@
+# =============================================================================
+# BankBuddy - local development orchestration
+#
+# Network model (see docs/security-boundaries.md):
+#   - "edge"     network: services that the host/browser can reach.
+#   - "internal" network: services that ONLY other containers can reach.
+#
+# Only `ui` and `api` publish ports. `agent`, `mock-bank`, and `postgres`
+# have NO `ports:` mapping and live on the internal network only.
+# =============================================================================
+
+networks:
+  edge:
+    driver: bridge
+  internal:
+    driver: bridge
+    internal: false   # set to true to also block egress; left false so agent can call external LLMs
+
+volumes:
+  postgres-data:
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL - shared instance, three schemas (app, agent_memory, bank).
+  # Internal network only. NOT reachable from the host.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: bankbuddy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bankbuddy}
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-postgres}
+      APP_DB_USER: ${APP_DB_USER:-app_user}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-app_pw}
+      AGENT_DB_USER: ${AGENT_DB_USER:-agent_user}
+      AGENT_DB_PASSWORD: ${AGENT_DB_PASSWORD:-agent_pw}
+      BANK_DB_USER: ${BANK_DB_USER:-bank_user}
+      BANK_DB_PASSWORD: ${BANK_DB_PASSWORD:-bank_pw}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_SUPERUSER:-postgres} -d ${POSTGRES_DB:-bankbuddy}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # mock-bank - stub core-banking REST API. Internal network only.
+  # ---------------------------------------------------------------------------
+  mock-bank:
+    build:
+      context: .
+      dockerfile: services/mock-bank/Dockerfile
+    container_name: bankbuddy-mock-bank
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: mock-bank
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # guardrails - policy enforcement service. Internal network only.
+  # Holds Azure AI Content Safety / Language credentials and AAD tokens so
+  # the agent never sees them. Validates Authorization: Bearer
+  # GUARDRAILS_INTERNAL_TOKEN on every /v1/* request.
+  # ---------------------------------------------------------------------------
+  guardrails:
+    build:
+      context: .
+      dockerfile: services/guardrails/Dockerfile
+    container_name: bankbuddy-guardrails
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: guardrails
+      # Same per-host AAD tokens consumed today by the agent. They move
+      # here so only this container needs Azure credentials.
+      AZURE_CONTENT_SAFETY_AAD_TOKEN: ${AZURE_CONTENT_SAFETY_AAD_TOKEN:-}
+      AZURE_LANGUAGE_AAD_TOKEN: ${AZURE_LANGUAGE_AAD_TOKEN:-${AZURE_CONTENT_SAFETY_AAD_TOKEN:-}}
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/healthz', timeout=2).status==200 else 1)\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # agent - LangGraph orchestrator. Internal network only.
+  # Requires X-Internal-Token header (only api knows it).
+  # ---------------------------------------------------------------------------
+  agent:
+    build:
+      context: .
+      dockerfile: services/agent/Dockerfile
+    container_name: bankbuddy-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: agent
+      # Per-stage HTTP budget for the agent -> guardrails service call.
+      # Must accommodate the slowest stage. tool_output runs up to 8 guards
+      # including 2 Azure ones (~3-4s each); 20s leaves comfortable headroom.
+      GUARDRAILS_TIMEOUT_SECONDS: "20"
+      # Optional: pre-fetched Entra ID bearer token for Azure OpenAI, set on
+      # the host by tools/refresh-aad-token.ps1. When present, the agent uses
+      # StaticBearerAuth and skips live credential exchange (useful when CA
+      # policies block service principals but the host user can sign in).
+      AZURE_OPENAI_AAD_TOKEN: ${AZURE_OPENAI_AAD_TOKEN:-}
+      # Optional: pre-fetched Entra ID bearer token for Azure AI Content
+      # Safety. Used by the azure-content-safety guardrail when no
+      # AZURE_CONTENT_SAFETY_KEY is set.
+      AZURE_CONTENT_SAFETY_AAD_TOKEN: ${AZURE_CONTENT_SAFETY_AAD_TOKEN:-}
+      # Optional: pre-fetched Entra ID bearer token for Azure AI Language
+      # (PII Entity Recognition). Used by azure-pii-detection guard when no
+      # AZURE_LANGUAGE_KEY is set. Falls back to AZURE_CONTENT_SAFETY_AAD_TOKEN.
+      AZURE_LANGUAGE_AAD_TOKEN: ${AZURE_LANGUAGE_AAD_TOKEN:-${AZURE_CONTENT_SAFETY_AAD_TOKEN:-}}
+    networks:
+      - internal
+    extra_hosts:
+      # Allow LiteLLM/Ollama on host to be reached as host.docker.internal on Linux.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-bank:
+        condition: service_started
+      guardrails:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # api - public BFF. Joined to BOTH networks so it can reach agent
+  # internally while being reachable from the host.
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    container_name: bankbuddy-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: api
+    ports:
+      - "${API_PORT:-8000}:8000"
+    networks:
+      - edge
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      agent:
+        condition: service_started
+
+  # ---------------------------------------------------------------------------
+  # ui - FastAPI serving the React build. Edge network only; talks to api.
+  # ---------------------------------------------------------------------------
+  ui:
+    build:
+      context: .
+      dockerfile: services/ui/Dockerfile
+    container_name: bankbuddy-ui
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: ui
+    ports:
+      - "${UI_PORT:-8080}:8080"
+    networks:
+      - edge
+    depends_on:
+      - api
