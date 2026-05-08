@@ -1,0 +1,46 @@
+%% BankBuddy - High-level demo diagram (video-optimized, minimal labels)
+flowchart LR
+    classDef edge       fill:#FFF4D6,stroke:#B8860B,stroke-width:2px,color:#1a1a1a
+    classDef internal   fill:#E6F0FF,stroke:#1F4FA0,stroke-width:2px,color:#1a1a1a
+    classDef guardrails fill:#FFE2E2,stroke:#B22222,stroke-width:3px,color:#1a1a1a
+    classDef azure      fill:#E8F5E8,stroke:#2E7D32,stroke-width:2px,color:#1a1a1a
+    classDef user       fill:#FFFFFF,stroke:#333,stroke-width:2px,color:#1a1a1a
+
+    User([👤 User<br/>Browser])
+
+    subgraph EDGE["🌐 EDGE NETWORK (host-published)"]
+        UI["UI<br/>:8090"]
+        API["API<br/>:8001"]
+    end
+
+    subgraph INT["🔒 INTERNAL NETWORK (no host ports)"]
+        AGENT["Agent<br/>(LangGraph)"]
+        GR["⚠ GUARDRAILS<br/>policy enforcement<br/>holds Azure creds"]
+        BANK["Mock Bank"]
+        DB[("Postgres")]
+    end
+
+    subgraph AZ["☁ AZURE"]
+        ACS["Content Safety<br/>+ Prompt Shield"]
+        LANG["AI Language<br/>PII"]
+        AOAI["Azure OpenAI<br/>GPT-5.2"]
+    end
+
+    User -->|HTTPS| UI
+    UI -->|REST| API
+    API -.->|"X-Internal-Token"| AGENT
+    AGENT -.->|"Bearer GUARDRAILS_INTERNAL_TOKEN"| GR
+    AGENT --> BANK
+    AGENT --> AOAI
+    BANK --> DB
+    GR --> ACS
+    GR --> LANG
+
+    class UI,API edge
+    class AGENT,BANK,DB internal
+    class GR guardrails
+    class ACS,LANG,AOAI azure
+    class User user
+
+    linkStyle 2 stroke:#B22222,stroke-width:3px
+    linkStyle 3 stroke:#B22222,stroke-width:3px
