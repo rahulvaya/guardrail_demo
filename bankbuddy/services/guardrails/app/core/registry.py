@@ -109,6 +109,11 @@ DEFAULT_OUTPUT_ORDER: list[tuple[str, bool]] = [
     ("secret-leak",          False),
     ("toxicity",             False),   # covered by Azure harm categories
     ("competitor-mentions",  False),
+    # Custom RAI guards that fill gaps in the managed Azure stack.
+    # Default OFF; flip on via GUARD_<NAME>_ENABLED=true.
+    ("groundedness",         False),   # RAG hallucination (Azure preview)
+    ("task-adherence",       False),   # runtime task-scope (Foundry eval-only)
+    ("bias-detect",          False),   # stereotype patterns (gap in Hate/Unfair)
 ]
 
 

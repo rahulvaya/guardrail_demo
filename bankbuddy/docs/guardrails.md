@@ -69,6 +69,9 @@ break user flow.
 | `secret-leak`         | OUTPUT | on      | BLOCK on AWS keys, GitHub PATs, OpenAI keys, JWTs, private keys, bearer tokens | -                                                      |
 | `toxicity`            | OUTPUT | on      | Block toxic outputs. Keyword default; optional `detoxify` engine              | `engine` (`keyword`\|`detoxify`), `threshold`, `words` |
 | `competitor-mentions` | OUTPUT | **off** | SANITIZE: replace competitor names with `<a competitor>`                       | `competitors` (list[str])                              |
+| `groundedness`        | OUTPUT | **off** | Score reply vs. `context["sources"]`. BLOCK / SANITIZE unsupported claims     | `engine`, `block_threshold`, `warn_threshold`, `require_sources` |
+| `task-adherence`      | OUTPUT | **off** | Keep reply inside the declared task scope (runtime gap-filler for Foundry eval) | `engine`, `in_scope_keywords`, `out_of_scope_keywords`, `block_threshold` |
+| `bias-detect`         | OUTPUT | **off** | Flag stereotype / demographic-skew patterns Hate/Unfair does not cover        | `engine`, `patterns`, `severity_map`                   |
 
 ---
 

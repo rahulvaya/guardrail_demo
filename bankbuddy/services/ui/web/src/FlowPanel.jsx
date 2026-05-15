@@ -38,6 +38,9 @@ const GUARD_FILES = {
   'azure-content-safety': 'guards/azure_content_safety.py',
   'azure-pii-detection': 'guards/azure_pii_detection.py',
   'response-shape': 'guards/response_shape.py',
+  groundedness: 'guards/groundedness.py',
+  'task-adherence': 'guards/task_adherence.py',
+  'bias-detect': 'guards/bias_detect.py',
 };
 
 const GUARDRAILS_BASE = 'services/guardrails/app/core/';

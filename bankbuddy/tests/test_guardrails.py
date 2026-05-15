@@ -210,5 +210,130 @@ def test_all_default_guards_registered():
         "token-limit", "banned-substrings", "prompt-injection",
         "pii-detect", "banking-relevance",
         "output-pii-redact", "secret-leak", "toxicity", "competitor-mentions",
+        "groundedness", "task-adherence", "bias-detect",
     }
     assert expected.issubset(set(registered_names()))
+
+
+# ---------------------------------------------------------------------------
+# Custom RAI guards - groundedness
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_groundedness_allows_when_supported():
+    g = build_guard("groundedness", {"block_threshold": 0.3, "warn_threshold": 0.4})
+    sources = [
+        "Your checking account balance as of today is 1234 dollars. "
+        "Recent transactions include a deposit and an ATM withdrawal."
+    ]
+    reply = "Your checking account balance is 1234 dollars with a recent deposit and ATM withdrawal."
+    r = await g.check(reply, context={"sources": sources})
+    assert r.decision == GuardDecision.ALLOW
+    assert r.score is not None and r.score >= 0.4
+
+
+@pytest.mark.asyncio
+async def test_groundedness_blocks_unsupported_claim():
+    g = build_guard("groundedness", {"block_threshold": 0.5, "warn_threshold": 0.8})
+    sources = ["Your checking balance is 1234 dollars."]
+    reply = (
+        "Mortgage rates dropped sharply last quarter and cryptocurrency prices "
+        "are forecast to triple by next year according to market analysts."
+    )
+    r = await g.check(reply, context={"sources": sources})
+    assert r.decision == GuardDecision.BLOCK
+    assert "rai.groundedness.unsupported" in r.categories
+
+
+@pytest.mark.asyncio
+async def test_groundedness_block_when_sources_required_but_missing():
+    g = build_guard("groundedness", {"require_sources": True})
+    reply = "Your checking balance is 5678 dollars and your last deposit was Monday."
+    r = await g.check(reply, context={})
+    assert r.decision == GuardDecision.BLOCK
+    assert "rai.groundedness.no-sources" in r.categories
+
+
+@pytest.mark.asyncio
+async def test_groundedness_sanitizes_when_no_sources_optional():
+    g = build_guard("groundedness", {"require_sources": False})
+    reply = "Your checking balance is 5678 dollars and your last deposit was Monday."
+    r = await g.check(reply, context={})
+    assert r.decision == GuardDecision.SANITIZE
+    assert "unverified" in r.sanitized_text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Custom RAI guards - task-adherence
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_task_adherence_allows_banking_reply():
+    g = build_guard("task-adherence", {})
+    reply = (
+        "Your checking account balance is 1234 dollars. I transferred 100 dollars to savings. "
+        "Your next mortgage payment is due on the first of next month."
+    )
+    r = await g.check(reply)
+    assert r.decision == GuardDecision.ALLOW
+
+
+@pytest.mark.asyncio
+async def test_task_adherence_blocks_off_scope_reply():
+    g = build_guard("task-adherence", {"min_length": 30})
+    reply = (
+        "Here is a poem about cats. Cats love sunlight. "
+        "Also, my favorite recipe for pasta includes garlic and olive oil."
+    )
+    r = await g.check(reply)
+    assert r.decision == GuardDecision.BLOCK
+    assert any(c.startswith("rai.task-adherence") for c in r.categories)
+
+
+@pytest.mark.asyncio
+async def test_task_adherence_skips_short_reply():
+    g = build_guard("task-adherence", {"min_length": 100})
+    r = await g.check("ok thanks")
+    assert r.decision == GuardDecision.ALLOW
+
+
+# ---------------------------------------------------------------------------
+# Custom RAI guards - bias-detect
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_bias_detect_blocks_high_severity():
+    g = build_guard("bias-detect", {})
+    reply = (
+        "In my experience women are bad at managing money so I would recommend "
+        "the husband handle all banking decisions for this household."
+    )
+    r = await g.check(reply)
+    assert r.decision == GuardDecision.BLOCK
+    assert any(c.startswith("rai.bias.") for c in r.categories)
+
+
+@pytest.mark.asyncio
+async def test_bias_detect_sanitizes_medium_severity():
+    g = build_guard(
+        "bias-detect",
+        {"severity_map": {"age-bias": "medium"}},
+    )
+    reply = (
+        "Honestly, old people cannot understand modern online banking systems, "
+        "so they should always visit a branch in person for any transaction."
+    )
+    r = await g.check(reply)
+    assert r.decision == GuardDecision.SANITIZE
+    assert "[neutralized]" in r.sanitized_text
+
+
+@pytest.mark.asyncio
+async def test_bias_detect_allows_clean_reply():
+    g = build_guard("bias-detect", {})
+    reply = (
+        "Your checking account balance is 1234 dollars. "
+        "I can help you set up a recurring transfer to savings if you like."
+    )
+    r = await g.check(reply)
+    assert r.decision == GuardDecision.ALLOW

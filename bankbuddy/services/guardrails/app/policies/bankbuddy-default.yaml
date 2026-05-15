@@ -64,7 +64,7 @@ input:
 
   # Custom scope guard - keep BankBuddy on banking topics.
   - banking-relevance:
-      enabled: true
+      enabled: false   # TEMP: disabled to test OUTPUT guards (task-adherence/bias-detect)
       min_ratio: 0.05
       min_length: 20
       refusal_message: >-
@@ -105,6 +105,30 @@ output:
   # Toxicity classifier on outgoing text.
   - toxicity:
       enabled: false
+
+  # ---- Custom RAI gap-fillers (default OFF; opt in per demo) -----------
+  # Groundedness: BLOCK / SANITIZE replies whose claims are not supported
+  # by retrieved sources (passed in via context["sources"]). Fills the
+  # gap left by Azure AI Content Safety detectGroundedness (preview).
+  - groundedness:
+      enabled: true
+      engine: overlap
+      block_threshold: 0.45
+      warn_threshold: 0.65
+      require_sources: false
+
+  # Task adherence: runtime enforcement that the reply stays within the
+  # declared banking task scope. Complements Foundry's eval-time
+  # TaskAdherenceEvaluator (preview).
+  - task-adherence:
+      enabled: true
+      engine: keyword
+
+  # Bias detection: flag stereotype / demographic-skew patterns the
+  # Hate-Unfairness harm category does not explicitly cover.
+  - bias-detect:
+      enabled: true
+      engine: lexicon
 
 # ---------------------------------------------------------------------------
 # TOOL_OUTPUT pipeline (runs on EVERY tool result before it is fed back to the
