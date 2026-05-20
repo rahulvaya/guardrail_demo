@@ -1,0 +1,458 @@
+# =============================================================================
+# Default policy bundle (domain-neutral).
+#
+# Ships with the guardrails service as a sensible baseline for any
+# consumer. Copy this file, change the `id`, and tune per your domain
+# (e.g. retail-banking, hr-helpdesk, customer-support, fraud-ops).
+#
+# HOW TO ENABLE / DISABLE A GUARD
+# -------------------------------
+# Every guard below has `enabled: true|false`. Flip and recreate:
+#
+#     docker compose up -d --force-recreate guardrails
+#
+# Order matters per stage: cheap deterministic checks first, Azure
+# managed checks next, custom scope/output checks last.
+#
+# Guard names must match the canonical hyphenated form registered in
+# app/core/guards/*.py. Run
+#   docker exec <container> python -c "from app.core import guards; \
+#     from app.core.registry import registered_names; print(registered_names())"
+# to list them.
+# =============================================================================
+
+id: default
+description: Default domain-neutral policy. Safety + privacy + secret leak.
+
+# ---------------------------------------------------------------------------
+# Guard reference (G-id → registered guard name → purpose)
+# Used by the comments below (e.g. "G-01 Content Filter") so the YAML lines
+# up 1:1 with the architecture diagram.
+#
+#   G-01  Content Filter         azure-content-safety
+#                                   (Analyze Text harm categories;
+#                                    severity_threshold tunes block point)
+#   G-02  Input Validation       token-limit            (DoS / oversize)
+#                                prompt-injection       (heuristic jailbreak)
+#                                azure-content-safety   (Prompt Shields on
+#                                   input via enable_prompt_shield: true)
+#   G-03  Intent Recognition     topic-relevance        (scope classifier;
+#                                   supply `keywords:` to activate)
+#   G-03a Task Adherence         azure-task-adherence   (Azure CS preview)
+#                                task-adherence         (local heuristic)
+#   G-04  PII Filtering          azure-pii-detection    (Azure AI Language;
+#                                   mode: block | sanitize)
+#                                pii-detect             (local regex)
+#                                output-pii-redact      (sanitize on output)
+#   G-05  Sensitive Data Filter  secret-leak            (API keys, JWTs,
+#                                   connection strings, private keys)
+#   G-06  Copyright Detection    azure-content-safety   (Protected Material
+#                                   on output via enable_protected_material)
+#   G-07  Custom Blocklist       banned-substrings      (local phrase list;
+#                                   driven by YAML + ${BANNED_PHRASES_JSON}
+#                                   + per-request context.banned_phrases)
+#                                azure-content-safety   (managed Text
+#                                   Blocklists via blocklist_names: [...])
+#   G-08  Hallucination Detection azure-groundedness    (Azure CS preview;
+#                                   needs context.sources [+ .query for QnA])
+#                                groundedness           (local overlap)
+#   G-09  Bias Detection         bias-detect            (lexicon engine)
+#
+# Additional registered guards (not tied to a G-id but available in any
+# stage):
+#   competitor-mentions   block configured competitor names on output
+#   toxicity              classifier-based toxicity score
+#
+# Run inside the container to list every registered name:
+#   docker exec <container> python -c "from app.core import guards; \
+#     from app.core.registry import registered_names; print(registered_names())"
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Pipeline checkpoints (architecture diagram ①…⑥):
+#   ① api_input    — request entering the public chat API
+#   ② input        — user message about to be sent to the LLM
+#   ③ output       — LLM reply coming back to the orchestrator
+#   ④ tool_input   — planned tool call (name + arguments) before execution
+#   ⑤ tool_output  — JSON returned by a tool before it is fed back to the LLM
+#   ⑥ api_output   — final assistant reply leaving the public API
+#
+# Every checkpoint is OPTIONAL: a missing top-level key means “no guards
+# run at that checkpoint”. Callers may also send `stage=llm_input` /
+# `stage=llm_output` as friendly aliases for `input` / `output`.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# ① API_INPUT  — first hop after the public chat API receives a request.
+# Heaviest set: hostile traffic is rejected here before any LLM tokens burn.
+# ---------------------------------------------------------------------------
+api_input:
+  - azure-content-safety:    # G-01 Content Filter (Analyze Text)
+      enabled: true
+      severity_threshold: 2
+      fail_open: false       # trust boundary: a missing safety net = block
+      timeout_seconds: 3
+      enable_prompt_shield: true   # G-02 Input Validation (AZ Prompt Shields)
+  - token-limit:             # G-02 Input Validation (DoS guard)
+      enabled: true
+      max_chars: 8000
+  - prompt-injection:        # G-02 Input Validation (heuristic backup)
+      enabled: true
+  - topic-relevance:         # G-03 Intent Recognition / scope classifier
+      enabled: false
+      min_ratio: 0.05
+      min_length: 20
+  - azure-pii-detection:     # G-04 PII Filtering (Presidio-style block)
+      enabled: true
+      mode: block
+      min_confidence: 0.5
+      # Whitelist: only flag real PII. Excludes DateTime / Person /
+      # Organization / Quantity which cause false positives on benign text.
+      categories: &pii_categories
+        - USSocialSecurityNumber
+        - CreditCardNumber
+        - Email
+        - PhoneNumber
+        - Address
+        - IPAddress
+        - ABARoutingNumber
+        - SWIFTCode
+        - InternationalBankingAccountNumber
+        - USDriversLicenseNumber
+        - USIndividualTaxIdentification
+  - banned-substrings:       # G-07 Custom Blocklist
+      enabled: false
+      case_sensitive: false
+      allow_overrides: true
+      phrases: ${BANNED_PHRASES_JSON:[]}
+
+# ---------------------------------------------------------------------------
+# ④ TOOL_INPUT  — planned tool call before execution. Validates the tool
+# name + arguments the LLM produced; defends external APIs from injection
+# and stops the agent from leaking PII / secrets into outbound calls.
+# ---------------------------------------------------------------------------
+tool_input:
+  - token-limit:             # G-02 Input Validation (oversize args)
+      enabled: true
+      max_chars: 8000
+  - azure-task-adherence:    # G-03a Task Adherence (vs user intent)
+      enabled: false
+      require_task_definition: false
+  - azure-pii-detection:     # G-04 PII Filtering on outbound params
+      enabled: true
+      mode: sanitize
+      min_confidence: 0.5
+      categories: *pii_categories
+  - pii-detect:              # local regex fallback
+      enabled: true
+      mode: sanitize
+  - secret-leak:             # G-05 Sensitive Data Filter
+      enabled: true
+
+# ---------------------------------------------------------------------------
+# ⑥ API_OUTPUT  — last hop before the response leaves the public API.
+# Final-line PII / copyright / blocklist / bias sweep.
+# ---------------------------------------------------------------------------
+api_output:
+  - azure-content-safety:    # G-01 Content Filter + G-06 + G-07
+      enabled: true
+      severity_threshold: 2
+      fail_open: true        # don't lose a clean reply to a transient blip
+      timeout_seconds: 3
+      enable_protected_material: true     # G-06 Copyright Detection
+      blocklist_names: ${ACS_BLOCKLIST_NAMES:[]}   # G-07 Custom Blocklist
+  - azure-pii-detection:     # G-04 Last-line PII sweep
+      enabled: true
+      mode: sanitize
+      min_confidence: 0.5
+      categories: *pii_categories
+  - pii-detect:              # local regex fallback
+      enabled: true
+      mode: sanitize
+  - secret-leak:             # G-05 Last-line credential check
+      enabled: true
+  - banned-substrings:       # G-07 Custom blocklist on final reply
+      enabled: false
+      case_sensitive: false
+      allow_overrides: true
+      phrases: ${BANNED_PHRASES_JSON:[]}
+  - bias-detect:             # G-09 Bias Detection
+      enabled: true
+      engine: lexicon
+
+# ---------------------------------------------------------------------------
+# All registered guards are listed in EVERY stage below so operators can
+# flip `enabled: true|false` per stage without editing the catalog. Guards
+# that are not naturally meant for a given stage (e.g. groundedness on
+# INPUT) are listed with `enabled: false` and a short note explaining why.
+# Canonical guard names (must match registry):
+#   azure-content-safety, azure-groundedness, azure-pii-detection,
+#   azure-task-adherence, banned-substrings, bias-detect,
+#   competitor-mentions, groundedness, output-pii-redact, pii-detect,
+#   prompt-injection, secret-leak, task-adherence, token-limit,
+#   topic-relevance, toxicity
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# INPUT pipeline (runs on every user message before the LLM)
+# ---------------------------------------------------------------------------
+input:
+  # Cheap DoS guard. Reject obviously oversized inputs.
+  - token-limit:
+      enabled: true
+      max_chars: 8000
+
+  # Hard blocklist of phrases.
+  # Sources (merged, case-insensitive, de-duped):
+  #   1. `phrases:` list below (policy baseline). Supports env-var
+  #      expansion: a whole-value `${VAR}` is JSON-parsed, so
+  #      `phrases: ${BANNED_PHRASES_JSON}` with env
+  #      BANNED_PHRASES_JSON='["foo","bar"]' becomes a real list.
+  #      Use `${VAR:default}` to fall back when the env var is unset.
+  #   2. per-request `context.banned_phrases` from /v1/check callers
+  #   3. built-in DEFAULT_PHRASES (only if 1 and 2 are empty)
+  # Set `allow_overrides: false` to lock the list to policy only.
+  - banned-substrings:
+      enabled: false
+      case_sensitive: false
+      allow_overrides: true
+      phrases: ${BANNED_PHRASES_JSON:[]}
+      
+  # Heuristic jailbreak / role-override detector (no GPU required).
+  - prompt-injection:
+      enabled: true
+
+  # Local regex PII detector (no cloud call).
+  - pii-detect:
+      enabled: true
+      mode: block
+
+  # Output-only PII redactor. Listed for completeness; keep disabled on input.
+  - output-pii-redact:
+      enabled: false
+
+  # Refuse leaked secrets / API keys / connection strings in user input.
+  - secret-leak:
+      enabled: true
+
+  # Azure AI Content Safety (harm categories + prompt-shield on input).
+  # fail_open: true here — api_input already runs the same guard
+  # fail-closed at the trust boundary, so we don't need a second
+  # fail-closed call here. Avoids blocking the whole turn on a
+  # transient ACS timeout.
+  - azure-content-safety:
+      enabled: true
+      severity_threshold: 2
+      fail_open: true
+      enable_prompt_shield: true
+      timeout_seconds: 3
+      # blocklist_names: ["corp-blocked-terms"]
+      # halt_on_blocklist_hit: true
+
+  # Azure AI Language PII detection.
+  - azure-pii-detection:
+      enabled: true
+      mode: block
+      min_confidence: 0.5
+      fail_open: true
+      categories: *pii_categories
+
+  # Azure managed Groundedness — OUTPUT-only check. Disabled on input.
+  - azure-groundedness:
+      enabled: false
+
+  # Azure managed Task Adherence — OUTPUT-only check. Disabled on input.
+  - azure-task-adherence:
+      enabled: false
+
+  # Topic relevance / scope. Opt in by supplying `keywords`.
+  - topic-relevance:
+      enabled: false
+      # keywords: ["account","balance","loan","card","atm"]
+      min_ratio: 0.05
+      min_length: 20
+
+  # Competitor mentions — typically an output concern, but can be applied
+  # to input if you need to reject prompts that name competitors.
+  - competitor-mentions:
+      enabled: false
+      # competitors: ["acme corp"]
+
+  # Toxicity classifier — usually OUTPUT, but can pre-filter abusive input.
+  - toxicity:
+      enabled: false
+
+  # Bias detection — usually OUTPUT, but can pre-filter loaded input.
+  - bias-detect:
+      enabled: false
+      engine: lexicon
+
+  # Groundedness — output-side check. Disabled on input.
+  - groundedness:
+      enabled: false
+
+  # Task adherence (local heuristic) — output-side check. Disabled on input.
+  - task-adherence:
+      enabled: false
+
+# ---------------------------------------------------------------------------
+# OUTPUT pipeline (runs on every assistant message before it leaves the agent)
+# ---------------------------------------------------------------------------
+output:
+  # Reject oversized assistant replies.
+  - token-limit:
+      enabled: false
+      max_chars: 16000
+
+  # Hard blocklist of phrases in assistant output.
+  - banned-substrings:
+      enabled: false
+      case_sensitive: false
+      allow_overrides: true
+      # phrases:
+      #   - "confidential project x"
+
+  # Prompt-injection patterns echoed back by the model.
+  - prompt-injection:
+      enabled: false
+
+  # Local regex PII fallback on assistant replies.
+  - pii-detect:
+      enabled: true
+      mode: sanitize
+
+  # Redact PII tokens in assistant replies (sanitize-style).
+  - output-pii-redact:
+      enabled: false
+
+  # Refuse to leak secrets / API keys / connection strings.
+  - secret-leak:
+      enabled: true
+
+  # Azure AI Content Safety (harm categories + Protected Material on output).
+  # fail_open: true — api_output runs the same guard for the final sweep;
+  # we don't want a transient ACS blip to lose a clean LLM reply.
+  - azure-content-safety:
+      enabled: true
+      severity_threshold: 2
+      fail_open: true
+      enable_protected_material: true
+      timeout_seconds: 3
+      # blocklist_names: ["corp-blocked-terms"]
+
+  - azure-pii-detection:
+      enabled: true
+      mode: sanitize
+      min_confidence: 0.5
+      categories: *pii_categories
+
+  # Azure managed Groundedness: requires `sources` in request context.
+  - azure-groundedness:
+      enabled: false
+      domain: Generic
+      task: QnA
+      require_sources: false
+
+  # Azure managed Task Adherence: requires `task_definition` in context.
+  - azure-task-adherence:
+      enabled: false
+      require_task_definition: false
+
+  # Topic relevance on output (rare — most teams check input only).
+  - topic-relevance:
+      enabled: false
+      # keywords: ["account","balance","loan","card","atm"]
+
+  # Competitor mentions in assistant replies.
+  - competitor-mentions:
+      enabled: false
+      # competitors: ["acme corp"]
+
+  # Toxicity classifier on outgoing text.
+  - toxicity:
+      enabled: false
+
+  # Bias detection: flag stereotype / demographic-skew patterns.
+  - bias-detect:
+      enabled: true
+      engine: lexicon
+
+  # Local heuristic groundedness (overlap-based, no Azure dependency).
+  - groundedness:
+      enabled: false
+      engine: overlap
+      block_threshold: 0.45
+      warn_threshold: 0.65
+      require_sources: false
+
+  # Local task-adherence heuristic.
+  - task-adherence:
+      enabled: false
+
+# ---------------------------------------------------------------------------
+# TOOL_OUTPUT pipeline (runs on EVERY tool result before it is fed back to
+# the LLM as a `role: "tool"` message). Defends against:
+#   - prompt-injection text inside tool data
+#   - PII leaking from downstream services
+#   - oversized payloads blowing the LLM context window
+#   - leaked secrets / API keys / connection strings
+# ---------------------------------------------------------------------------
+tool_output:
+  - token-limit:
+      enabled: true
+      max_chars: 16000
+
+  - banned-substrings:
+      enabled: false
+
+  - prompt-injection:
+      enabled: true
+
+  - pii-detect:
+      enabled: true
+      mode: sanitize
+
+  - output-pii-redact:
+      enabled: false
+
+  - secret-leak:
+      enabled: true
+
+  - azure-content-safety:
+      enabled: true
+      severity_threshold: 2
+      fail_open: true
+      timeout_seconds: 3
+
+  - azure-pii-detection:
+      enabled: true
+      mode: sanitize
+      min_confidence: 0.5
+      categories: *pii_categories
+
+  # Azure managed Groundedness — typically output-only. Off here.
+  - azure-groundedness:
+      enabled: false
+
+  # Azure managed Task Adherence — typically output-only. Off here.
+  - azure-task-adherence:
+      enabled: false
+
+  - topic-relevance:
+      enabled: false
+
+  - competitor-mentions:
+      enabled: false
+
+  - toxicity:
+      enabled: false
+
+  - bias-detect:
+      enabled: false
+      engine: lexicon
+
+  - groundedness:
+      enabled: false
+
+  - task-adherence:
+      enabled: false

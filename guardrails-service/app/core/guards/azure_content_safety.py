@@ -1,44 +1,50 @@
 """azure-content-safety: Azure AI Content Safety guardrail.
 
 This single guard wraps multiple Azure AI Content Safety APIs so one
-managed service covers the bulk of input + output moderation:
+managed service covers most input + output moderation needs:
 
 INPUT stage:
   * ``text:shieldPrompt``  -> jailbreak / prompt-injection detection
   * ``text:analyze``       -> Hate / SelfHarm / Sexual / Violence
+                              (+ optional Text Blocklists)
 
 OUTPUT stage:
   * ``text:analyze``       -> Hate / SelfHarm / Sexual / Violence
-                              (covers toxicity / harmful generation)
+                              (+ optional Text Blocklists)
+  * ``text:detectProtectedMaterial`` -> copyrighted text detection
 
-Coverage notes (read carefully):
+Sibling Azure guards (separate modules):
+  * ``azure-groundedness``   -> {endpoint}/text:detectGroundedness
+  * ``azure-task-adherence`` -> {endpoint}/text:detectTaskAdherence
+
+Coverage notes:
   * Azure AI Content Safety does NOT natively cover regex-style PII
-    (SSNs / cards), secret leakage (API keys), or banned-substring
-    blocklists. Those concerns map to the local guards
-    ``pii-detect`` / ``output-pii-redact`` / ``secret-leak`` /
-    ``banned-substrings``. Re-enable them via their
-    ``GUARD_*_ENABLED=true`` flags when you need that coverage.
-  * Azure AI Language has a separate PII detection API; integrate it
-    by extending ``pii_detect`` with an ``engine="azure-language"``
-    branch (not enabled in this build).
+    (SSNs / cards) or secret leakage (API keys). Those map to the local
+    guards ``pii-detect`` / ``secret-leak``.
+  * Azure AI Language has a separate PII detection API covered by the
+    ``azure-pii-detection`` guard.
 
 Configuration (env: ``GUARD_AZURE_CONTENT_SAFETY_CONFIG`` JSON):
 
-    endpoint           Azure AI Content Safety resource endpoint.
-                       Defaults to env ``AZURE_CONTENT_SAFETY_ENDPOINT``.
-    api_key            Subscription key. Defaults to env
-                       ``AZURE_CONTENT_SAFETY_KEY``. When empty, the
-                       guard falls back to Entra ID (a pre-fetched
-                       ``AZURE_CONTENT_SAFETY_AAD_TOKEN`` or
-                       ``DefaultAzureCredential``).
-    api_version        Defaults to ``2024-09-01``.
-    categories         Harm categories evaluated by ``text:analyze``.
-                       Default: ``["Hate","SelfHarm","Sexual","Violence"]``.
-    severity_threshold Block when any harm severity >= this value.
-                       FourSeverityLevels: 0/2/4/6. Default 4.
-    enable_prompt_shield  Run ``text:shieldPrompt`` on INPUT. Default True.
-    timeout_seconds    Per-request timeout. Default 5.
-    fail_open          On API errors, ALLOW (True, default) or BLOCK.
+    endpoint                Azure AI Content Safety resource endpoint.
+                            Defaults to env ``AZURE_CONTENT_SAFETY_ENDPOINT``.
+    api_key                 Subscription key. Defaults to env
+                            ``AZURE_CONTENT_SAFETY_KEY``. When empty, the
+                            guard falls back to Entra ID.
+    api_version             Defaults to ``2024-09-01``.
+    categories              Harm categories evaluated by ``text:analyze``.
+                            Default: ``["Hate","SelfHarm","Sexual","Violence"]``.
+    severity_threshold      Block when any harm severity >= this value.
+                            FourSeverityLevels: 0/2/4/6. Default 4.
+    enable_prompt_shield    Run ``text:shieldPrompt`` on INPUT. Default True.
+    enable_protected_material  Run ``text:detectProtectedMaterial`` on
+                            OUTPUT. Default False (opt-in).
+    blocklist_names         List of Azure-managed blocklist names to
+                            apply in ``text:analyze``. Default [].
+    halt_on_blocklist_hit   Block immediately on blocklist match.
+                            Default True.
+    timeout_seconds         Per-request timeout. Default 5.
+    fail_open               On API errors, ALLOW (True, default) or BLOCK.
 """
 from __future__ import annotations
 
@@ -53,6 +59,7 @@ from ..registry import register_guard
 from .azure_endpoints import (
     COGNITIVE_SERVICES_AAD_SCOPE,
     CONTENT_SAFETY_API_VERSION,
+    content_safety_protected_material_url,
     content_safety_shield_prompt_url,
     content_safety_text_analyze_url,
 )
@@ -86,6 +93,13 @@ class AzureContentSafetyGuard(Guard):
             config.get("severity_threshold", DEFAULT_SEVERITY_THRESHOLD)
         )
         self.enable_prompt_shield: bool = bool(config.get("enable_prompt_shield", True))
+        self.enable_protected_material: bool = bool(
+            config.get("enable_protected_material", False)
+        )
+        self.blocklist_names: list[str] = list(config.get("blocklist_names", []))
+        self.halt_on_blocklist_hit: bool = bool(
+            config.get("halt_on_blocklist_hit", True)
+        )
         self.timeout_seconds: float = float(config.get("timeout_seconds", 5.0))
         self.fail_open: bool = bool(config.get("fail_open", True))
 
@@ -105,36 +119,42 @@ class AzureContentSafetyGuard(Guard):
     # ------------------------------------------------------------------
 
     def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self.timeout_seconds)
-        return self._client
+        # Shared process-wide client (HTTP/2 + kept-alive pool); see
+        # core/azure_http.py for rationale.
+        from ..azure_http import get_client
+        return get_client(timeout=self.timeout_seconds)
 
     async def aclose(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        # No-op: shared client is owned by core.azure_http and closed in
+        # the FastAPI lifespan shutdown hook.
+        return None
 
     # ------------------------------------------------------------------
     # Auth
     # ------------------------------------------------------------------
 
-    def _auth_headers(self) -> dict[str, str]:
+    def _auth_headers_sync(self) -> dict[str, str] | None:
+        """Fast path: key or env-supplied token. Returns None when AAD is needed."""
         if self.api_key:
             return {"Ocp-Apim-Subscription-Key": self.api_key}
 
         token = os.getenv(self._aad_token_env)
         if token:
             return {"Authorization": f"Bearer {token}"}
+        return None
 
-        try:  # pragma: no cover - best-effort import
-            if self._aad_credential is None:
-                from azure.identity import DefaultAzureCredential  # type: ignore
-                self._aad_credential = DefaultAzureCredential()
-            access = self._aad_credential.get_token(_AAD_SCOPE)
-            return {"Authorization": f"Bearer {access.token}"}
+    async def _auth_headers(self) -> dict[str, str]:
+        fast = self._auth_headers_sync()
+        if fast is not None:
+            return fast
+        try:
+            from ..aad_cache import get_bearer_token  # local import keeps cold-start light
+            token = await get_bearer_token(_AAD_SCOPE)
+            if token:
+                return {"Authorization": f"Bearer {token}"}
         except Exception as e:  # noqa: BLE001
             log.warning("azure-content-safety: AAD auth unavailable: %r", e)
-            return {}
+        return {}
 
     # ------------------------------------------------------------------
     # Check
@@ -147,21 +167,47 @@ class AzureContentSafetyGuard(Guard):
         if not self.endpoint:
             return self._fail(text, reason="no endpoint configured")
 
-        headers = {"Content-Type": "application/json", **self._auth_headers()}
+        headers = {"Content-Type": "application/json", **(await self._auth_headers())}
         if "Ocp-Apim-Subscription-Key" not in headers and "Authorization" not in headers:
             return self._fail(text, reason="no credentials available")
 
         stage = str((context or {}).get("stage", "input")).lower()
+        # Input-family stages (api_input, input/llm_input, tool_input) get
+        # Prompt Shields. Output-family stages (output/llm_output, tool_output,
+        # api_output) get Protected Material. Harm categories run on both.
+        input_family = stage in ("api_input", "input", "llm_input", "tool_input")
 
-        # 1) INPUT-only: Prompt Shields (jailbreak / prompt-injection)
-        prompt_shield_meta: dict[str, Any] | None = None
-        if stage == "input" and self.enable_prompt_shield:
-            shield_block, prompt_shield_meta = await self._run_prompt_shield(text, headers)
-            if shield_block is not None:
+        # Run the optional pre-check (Prompt Shield on input-family, Protected
+        # Material on output-family) IN PARALLEL with text:analyze, since they
+        # are independent Azure API calls. Whichever first decision says BLOCK
+        # wins; otherwise we return the text:analyze result. Cuts wall-clock
+        # latency of this guard from ~2 round-trips to ~1.
+        import asyncio  # local import keeps module import surface minimal
+
+        analyze_task = asyncio.create_task(
+            self._run_text_analyze(text, headers, None)
+        )
+
+        pre_task: asyncio.Task | None = None
+        if input_family and self.enable_prompt_shield:
+            async def _shield_only() -> GuardCheckResult | None:
+                shield_block, _meta = await self._run_prompt_shield(text, headers)
                 return shield_block
+            pre_task = asyncio.create_task(_shield_only())
+        elif (not input_family) and self.enable_protected_material:
+            pre_task = asyncio.create_task(self._run_protected_material(text, headers))
 
-        # 2) Both stages: harm categories via text:analyze
-        return await self._run_text_analyze(text, headers, prompt_shield_meta)
+        if pre_task is not None:
+            pre_block = await pre_task
+            if pre_block is not None:
+                analyze_task.cancel()
+                try:
+                    await analyze_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+                return pre_block
+
+        return await analyze_task
 
     # ------------------------------------------------------------------
     # Prompt Shields
@@ -228,6 +274,9 @@ class AzureContentSafetyGuard(Guard):
             "categories": self.categories,
             "outputType": "FourSeverityLevels",
         }
+        if self.blocklist_names:
+            payload["blocklistNames"] = self.blocklist_names
+            payload["haltOnBlocklistHit"] = self.halt_on_blocklist_hit
         try:
             resp = await self._get_client().post(url, json=payload, headers=headers)
             resp.raise_for_status()
@@ -249,6 +298,10 @@ class AzureContentSafetyGuard(Guard):
             worst[cat] = sev
             if sev >= self.severity_threshold:
                 triggered.append((cat, sev))
+
+        # Azure Text Blocklists: any match is a hard block (irrespective
+        # of severity_threshold).
+        blocklist_matches = body.get("blocklistsMatch") or []
 
         max_sev = max(worst.values(), default=0)
         # Per-category pass/fail breakdown so the UI can show every
@@ -281,6 +334,32 @@ class AzureContentSafetyGuard(Guard):
         }
         if prompt_shield_meta is not None:
             common_meta["prompt_shield"] = prompt_shield_meta
+        if self.blocklist_names:
+            common_meta["blocklists"] = {
+                "names": self.blocklist_names,
+                "matches": blocklist_matches,
+            }
+
+        if blocklist_matches:
+            samples = [
+                {
+                    "blocklist": m.get("blocklistName"),
+                    "item_id": m.get("blocklistItemId"),
+                    "matched_text": m.get("blocklistItemText"),
+                }
+                for m in blocklist_matches[:5]
+            ]
+            return self._block(
+                text,
+                reasons=[
+                    f"blocklist '{m.get('blocklistName')}' matched: "
+                    f"{m.get('blocklistItemText')!r}"
+                    for m in blocklist_matches[:3]
+                ],
+                categories=["azure.blocklist"],
+                score=1.0,
+                metadata={**common_meta, "blocklist_samples": samples},
+            )
 
         if triggered:
             triggered.sort(key=lambda x: -x[1])
@@ -296,6 +375,48 @@ class AzureContentSafetyGuard(Guard):
             )
 
         return self._allow(text, score=float(max_sev) / 6.0, metadata=common_meta)
+
+    # ------------------------------------------------------------------
+    # text:detectProtectedMaterial (copyrighted text)
+    # ------------------------------------------------------------------
+
+    async def _run_protected_material(
+        self, text: str, headers: dict[str, str]
+    ) -> GuardCheckResult | None:
+        url = content_safety_protected_material_url(self.endpoint, self.api_version)
+        payload = {"text": text}
+        try:
+            resp = await self._get_client().post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            body = resp.json()
+        except httpx.HTTPStatusError as e:
+            log.warning(
+                "azure-content-safety protected-material HTTP %s: %s",
+                e.response.status_code, e.response.text[:200],
+            )
+            return None  # fail-soft for this sub-check; main analyze still runs
+        except Exception as e:  # noqa: BLE001
+            log.warning("azure-content-safety protected-material error: %r", e)
+            return None
+
+        analysis = body.get("protectedMaterialAnalysis") or {}
+        detected = bool(analysis.get("detected", False))
+        if not detected:
+            return None
+
+        return self._block(
+            text,
+            reasons=["protected-material: copyrighted text detected"],
+            categories=["azure.protected_material"],
+            score=1.0,
+            metadata={
+                "protected_material": analysis,
+                "category_results": [
+                    {"category": "ProtectedMaterial", "severity": 6, "passed": False},
+                ],
+                "check": "text:detectProtectedMaterial",
+            },
+        )
 
     # ------------------------------------------------------------------
 

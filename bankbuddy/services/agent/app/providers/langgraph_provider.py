@@ -73,7 +73,30 @@ class LangGraphAgent(IAgentProvider):
             user_message = request.message
             guard_trace: dict[str, Any] = {}
 
-            # ---- INPUT guardrails ----
+            # ---- ① API_INPUT guardrails (heaviest, request just arrived) ----
+            if self._guardrails is not None:
+                api_in = await self._guardrails.check_api_input(
+                    user_message,
+                    context={"session_id": request.session_id, "subject": request.principal.subject},
+                )
+                if api_in.checks:
+                    guard_trace["api_input"] = _serialize_pipeline_result(api_in)
+                if not api_in.allowed:
+                    return AgentInvokeResponse(
+                        session_id=request.session_id,
+                        reply=self._block_message,
+                        tool_calls=[],
+                        metadata={
+                            "blocked": True,
+                            "blocked_at": "api_input",
+                            "block_reasons": api_in.block_reasons,
+                            "block_categories": api_in.block_categories,
+                            "guardrails": guard_trace,
+                        },
+                    )
+                user_message = api_in.sanitized_text
+
+            # ---- ② INPUT (LLM input) guardrails ----
             if self._guardrails is not None:
                 inp = await self._guardrails.check_input(
                     user_message,
@@ -135,6 +158,30 @@ class LangGraphAgent(IAgentProvider):
                             )
                         final_reply = outp.sanitized_text
 
+                    # ---- ⑦ API_OUTPUT guardrails (last hop before client) ----
+                    if self._guardrails is not None:
+                        api_out = await self._guardrails.check_api_output(
+                            final_reply,
+                            context={"session_id": request.session_id, "subject": request.principal.subject},
+                        )
+                        if api_out.checks:
+                            guard_trace["api_output"] = _serialize_pipeline_result(api_out)
+                            out_metadata["guardrails"] = guard_trace
+                        if not api_out.allowed:
+                            return AgentInvokeResponse(
+                                session_id=request.session_id,
+                                reply=self._block_message,
+                                tool_calls=tools_called,
+                                metadata={
+                                    "blocked": True,
+                                    "blocked_at": "api_output",
+                                    "block_reasons": api_out.block_reasons,
+                                    "block_categories": api_out.block_categories,
+                                    "guardrails": guard_trace,
+                                },
+                            )
+                        final_reply = api_out.sanitized_text
+
                     return AgentInvokeResponse(
                         session_id=request.session_id,
                         reply=final_reply,
@@ -147,6 +194,74 @@ class LangGraphAgent(IAgentProvider):
                     name = fn["name"]
                     raw_args = fn.get("arguments") or "{}"
                     log.info("tool_call hop=%d name=%s", hop, name)
+
+                    # ---- ④ TOOL_INPUT guardrails (planned tool call) ----
+                    # We feed the guard the JSON shape {tool, arguments} so PII /
+                    # secret / oversize / task-adherence guards can inspect both
+                    # the tool name and the arguments before any external call.
+                    if self._guardrails is not None:
+                        tin_payload = json.dumps({"tool": name, "arguments": _safe_json_load(raw_args)})
+                        tin = await self._guardrails.check_tool_input(
+                            tin_payload,
+                            context={
+                                "session_id": request.session_id,
+                                "subject": request.principal.subject,
+                                "tool_name": name,
+                                "hop": hop,
+                            },
+                        )
+                        if tin.checks:
+                            guard_trace.setdefault("tool_inputs", []).append(
+                                {
+                                    "tool_name": name,
+                                    "hop": hop,
+                                    **_serialize_pipeline_result(tin),
+                                }
+                            )
+                        if not tin.allowed:
+                            blocked_marker = json.dumps(
+                                {
+                                    "error": "tool_input_blocked_by_guardrails",
+                                    "tool": name,
+                                    "reasons": tin.block_reasons,
+                                    "categories": tin.block_categories,
+                                    "message": (
+                                        "The planned tool call was withheld by "
+                                        "guardrails policy. Apologize to the user "
+                                        "and offer to retry without sensitive data."
+                                    ),
+                                }
+                            )
+                            try:
+                                args_dict = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+                            except json.JSONDecodeError:
+                                args_dict = {"_raw": raw_args}
+                            tools_called.append(
+                                ToolCall(
+                                    name=name,
+                                    arguments=args_dict,
+                                    result={
+                                        "_blocked_by_guardrails": True,
+                                        "stage": "tool_input",
+                                        "reasons": tin.block_reasons,
+                                        "categories": tin.block_categories,
+                                    },
+                                )
+                            )
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tc.get("id", ""),
+                                    "name": name,
+                                    "content": blocked_marker,
+                                }
+                            )
+                            log.warning(
+                                "tool_input BLOCK hop=%d tool=%s reasons=%s",
+                                hop, name, tin.block_reasons,
+                            )
+                            continue
+
                     output_json = await self._tools.call(name, raw_args, user_id=request.principal.subject)
                     try:
                         args_dict = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
@@ -279,3 +394,15 @@ def _serialize_pipeline_result(result: Any) -> dict[str, Any]:
             for c in result.checks
         ],
     }
+
+
+def _safe_json_load(raw: Any) -> Any:
+    """Best-effort JSON parse for tool arguments; never raises."""
+    if isinstance(raw, (dict, list)):
+        return raw
+    if not isinstance(raw, str):
+        return {"_raw": str(raw)}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"_raw": raw}

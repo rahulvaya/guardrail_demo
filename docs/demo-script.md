@@ -30,7 +30,7 @@ Open in separate windows / tabs:
 |-------:|-------------------------------------------------|--------------------------------------------------------|
 | 1      | UI                                              | <http://localhost:8080>                                |
 | 2      | Architecture diagram                            | [docs/diagrams/bankbuddy-architecture.png](diagrams/bankbuddy-architecture.png) |
-| 3      | Guardrails policy YAML                          | [bankbuddy/services/guardrails/app/policies/bankbuddy-default.yaml](../bankbuddy/services/guardrails/app/policies/bankbuddy-default.yaml) |
+| 3      | Guardrails policy YAML                          | [guardrails-service/app/policies/bankbuddy-default.yaml](../guardrails-service/app/policies/bankbuddy-default.yaml) |
 | 4      | Live guardrails logs                            | `docker compose logs -f guardrails`                    |
 | 5      | Live agent logs                                 | `docker compose logs -f agent`                         |
 | 6      | PowerShell ready for `smoke_guardrails.py`      | (see Section 4)                                        |
@@ -68,7 +68,7 @@ Key points to land:
    - Validated independently (own tests, own deploy cadence).
    - Same contract works for any agent we add later.
 3. **Per-request token.** The agent calls guardrails with `Authorization: Bearer GUARDRAILS_INTERNAL_TOKEN`. The api calls the agent with `X-Internal-Token`. Both rotate via env vars.
-4. **Policy-as-data.** The pipeline is declared in [bankbuddy-default.yaml](../bankbuddy/services/guardrails/app/policies/bankbuddy-default.yaml) - flip `enabled: true|false`, recreate one container, done. No code change.
+4. **Policy-as-data.** The pipeline is declared in [bankbuddy-default.yaml](../guardrails-service/app/policies/bankbuddy-default.yaml) - flip `enabled: true|false`, recreate one container, done. No code change.
 
 ---
 
@@ -111,7 +111,7 @@ Walk through the output line by line. Highlights:
 - Output stage SSN test - returns `SANITIZE` with a redacted string. The agent forwards the sanitized text, never the raw SSN.
 - AWS key test - hard BLOCK. Even if the model hallucinates a credential, it never leaves the boundary.
 
-Open [bankbuddy-default.yaml](../bankbuddy/services/guardrails/app/policies/bankbuddy-default.yaml) and show:
+Open [bankbuddy-default.yaml](../guardrails-service/app/policies/bankbuddy-default.yaml) and show:
 
 ```yaml
 - pii-detect:

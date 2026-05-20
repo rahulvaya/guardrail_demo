@@ -23,27 +23,30 @@ const TOOL_TO_SERVICE = {
   check_loan_eligibility: 'MockBankHttpClient.check_loan_eligibility',
 };
 
-// Each guard's source file (relative to services/guardrails/app/core/).
-// Guards now live in the standalone guardrails service, not the agent.
+// Each guard's source file (relative to guardrails-service/app/core/).
+// Guards live in the standalone guardrails-service repo, not the agent.
 const GUARD_FILES = {
   'token-limit': 'guards/token_limit.py',
   'banned-substrings': 'guards/banned_substrings.py',
   'prompt-injection': 'guards/prompt_injection.py',
   'pii-detect': 'guards/pii_detect.py',
   'banking-relevance': 'guards/banking_relevance.py',
+  'topic-relevance': 'guards/topic_relevance.py',
   'output-pii-redact': 'guards/output_pii_redact.py',
   'secret-leak': 'guards/secret_leak.py',
   toxicity: 'guards/toxicity.py',
   'competitor-mentions': 'guards/competitor_mentions.py',
   'azure-content-safety': 'guards/azure_content_safety.py',
   'azure-pii-detection': 'guards/azure_pii_detection.py',
+  'azure-groundedness': 'guards/azure_groundedness.py',
+  'azure-task-adherence': 'guards/azure_task_adherence.py',
   'response-shape': 'guards/response_shape.py',
   groundedness: 'guards/groundedness.py',
   'task-adherence': 'guards/task_adherence.py',
   'bias-detect': 'guards/bias_detect.py',
 };
 
-const GUARDRAILS_BASE = 'services/guardrails/app/core/';
+const GUARDRAILS_BASE = 'guardrails-service/app/core/';
 
 function FnRow({ idx, fn, file, decision, note, depth = 0, blocked }) {
   const cls = ['flow-row'];
@@ -85,18 +88,23 @@ export default function FlowPanel({ trace, busy, lastUser }) {
     return <div className="flow-empty">Tracing request...</div>;
   }
 
+  const apiInputChecks = trace?.guardrails?.api_input?.checks || [];
   const inputChecks = trace?.guardrails?.input?.checks || [];
   const outputChecks = trace?.guardrails?.output?.checks || [];
+  const apiOutputChecks = trace?.guardrails?.api_output?.checks || [];
+  const toolInputRuns = trace?.guardrails?.tool_inputs || [];
   const toolOutputRuns = trace?.guardrails?.tool_outputs || [];
   const toolCalls = trace?.tool_calls || [];
-  const blockedAt = trace?.blocked_at; // 'input' | 'output' | null
+  const blockedAt = trace?.blocked_at; // 'api_input' | 'input' | 'tool_input' | 'output' | 'api_output' | null
   const blocked = !!trace?.blocked;
 
   let i = 0;
   const next = () => ++i;
 
-  const llmReached = blockedAt !== 'input';
-  const outputReached = blockedAt !== 'input';
+  const inputReached = blockedAt !== 'api_input';
+  const llmReached = !['api_input', 'input'].includes(blockedAt);
+  const outputReached = !['api_input', 'input'].includes(blockedAt);
+  const apiOutputReached = !['api_input', 'input', 'output'].includes(blockedAt);
 
   return (
     <div className="flow-list">
@@ -121,9 +129,30 @@ export default function FlowPanel({ trace, busy, lastUser }) {
         <FnRow idx={next()} fn="LangGraphProvider.invoke()" file="services/agent/app/providers/langgraph_provider.py" />
       </Section>
 
-      <Section title={`Input guardrails${blockedAt === 'input' ? ' — BLOCKED' : ''}`}>
+      <Section title={`① API_INPUT guardrails${blockedAt === 'api_input' ? ' — BLOCKED' : ''}`}>
+        <FnRow idx={next()} fn="RemoteGuardrailPipeline.check_api_input()" file="services/agent/app/guardrails_client.py" note="httpx -> guardrails:8001/v1/check (stage=api_input)" />
+        <FnRow idx={next()} fn="check()" file="guardrails-service/app/main.py" depth={1} note="FastAPI route POST /v1/check" />
+        <FnRow idx={next()} fn="GuardPipeline.check_api_input()" file={`${GUARDRAILS_BASE}pipeline.py`} depth={1} />
+        {apiInputChecks.length === 0 && (
+          <FnRow idx={next()} fn="(no guards configured at api_input)" file="guardrails-service/app/policies/default.yaml" depth={2} note="add guards under `api_input:` to activate" />
+        )}
+        {apiInputChecks.map((c) => (
+          <FnRow
+            key={`apiin-${c.guard}`}
+            idx={next()}
+            fn={`${classFor(c.guard)}.check()`}
+            file={`${GUARDRAILS_BASE}${GUARD_FILES[c.guard] || 'guards/?.py'}`}
+            decision={c.decision}
+            note={c.decision === 'block' ? (c.categories || []).join(', ') || 'blocked' : null}
+            depth={2}
+          />
+        ))}
+      </Section>
+
+      {inputReached && (
+        <Section title={`② INPUT (LLM input) guardrails${blockedAt === 'input' ? ' — BLOCKED' : ''}`}>
         <FnRow idx={next()} fn="RemoteGuardrailPipeline.run(stage='input')" file="services/agent/app/guardrails_client.py" note="httpx -> guardrails:8001/v1/check (bearer)" />
-        <FnRow idx={next()} fn="check()" file="services/guardrails/app/main.py" depth={1} note="FastAPI route POST /v1/check" />
+        <FnRow idx={next()} fn="check()" file="guardrails-service/app/main.py" depth={1} note="FastAPI route POST /v1/check" />
         <FnRow idx={next()} fn="GuardPipeline.run(stage='input')" file={`${GUARDRAILS_BASE}pipeline.py`} depth={1} />
         {inputChecks.map((c) => (
           <FnRow
@@ -141,6 +170,7 @@ export default function FlowPanel({ trace, busy, lastUser }) {
           />
         ))}
       </Section>
+      )}
 
       {llmReached && (
         <Section title="LLM + tools">
@@ -155,8 +185,52 @@ export default function FlowPanel({ trace, busy, lastUser }) {
             toolCalls.forEach((tc, idx) => {
               const n = seen.get(tc.name) || 0;
               seen.set(tc.name, n + 1);
+              const matchingIn = toolInputRuns.filter((g) => g.tool_name === tc.name)[n];
               const matching = toolOutputRuns.filter((g) => g.tool_name === tc.name)[n];
               const toolBlocked = !!tc.result?._blocked_by_guardrails;
+              const blockedAtToolInput = tc.result?.stage === 'tool_input';
+
+              // ④ TOOL_INPUT guardrails (BEFORE the tool runs)
+              if (matchingIn && matchingIn.checks?.length > 0) {
+                rows.push(
+                  <FnRow
+                    key={`ti-pipeline-${idx}`}
+                    idx={next()}
+                    fn={`RemoteGuardrailPipeline.check_tool_input(tool='${tc.name}')`}
+                    file="services/agent/app/guardrails_client.py"
+                    depth={1}
+                    note={`httpx -> guardrails:8001/v1/check (stage=tool_input) — ${matchingIn.duration_ms} ms`}
+                    decision={matchingIn.allowed ? 'allow' : 'block'}
+                  />
+                );
+                matchingIn.checks.forEach((c, j) => {
+                  rows.push(
+                    <FnRow
+                      key={`ti-${idx}-${j}-${c.guard}`}
+                      idx={next()}
+                      fn={`${classFor(c.guard)}.check()`}
+                      file={`${GUARDRAILS_BASE}${GUARD_FILES[c.guard] || 'guards/?.py'}`}
+                      decision={c.decision}
+                      note={c.decision === 'block' ? (c.categories || []).join(', ') || 'blocked' : null}
+                      depth={2}
+                    />
+                  );
+                });
+                if (blockedAtToolInput) {
+                  rows.push(
+                    <FnRow
+                      key={`ti-skip-${idx}`}
+                      idx={next()}
+                      fn="(tool dispatch SKIPPED — blocked at tool_input)"
+                      file="services/agent/app/providers/langgraph_provider.py"
+                      depth={2}
+                      note="LLM sees blocked-marker JSON instead of running the tool"
+                    />
+                  );
+                  return; // skip rendering the dispatcher row for this tool
+                }
+              }
+
               rows.push(
                 <FnRow
                   key={`tc-${idx}`}
@@ -197,7 +271,7 @@ export default function FlowPanel({ trace, busy, lastUser }) {
                     key={`tg-route-${idx}`}
                     idx={next()}
                     fn="check()"
-                    file="services/guardrails/app/main.py"
+                    file="guardrails-service/app/main.py"
                     depth={2}
                     note="FastAPI route POST /v1/check (tool_output)"
                   />
@@ -248,9 +322,9 @@ export default function FlowPanel({ trace, busy, lastUser }) {
       )}
 
       {outputReached && (
-        <Section title={`Output guardrails${blockedAt === 'output' ? ' — BLOCKED' : ''}`}>
-          <FnRow idx={next()} fn="RemoteGuardrailPipeline.run(stage='output')" file="services/agent/app/guardrails_client.py" note="httpx -> guardrails:8001/v1/check (bearer)" />
-          <FnRow idx={next()} fn="check()" file="services/guardrails/app/main.py" depth={1} note="FastAPI route POST /v1/check" />
+        <Section title={`③ OUTPUT (LLM output) guardrails${blockedAt === 'output' ? ' — BLOCKED' : ''}`}>
+          <FnRow idx={next()} fn="RemoteGuardrailPipeline.check_output()" file="services/agent/app/guardrails_client.py" note="httpx -> guardrails:8001/v1/check (stage=output)" />
+          <FnRow idx={next()} fn="check()" file="guardrails-service/app/main.py" depth={1} note="FastAPI route POST /v1/check" />
           <FnRow idx={next()} fn="GuardPipeline.run(stage='output')" file={`${GUARDRAILS_BASE}pipeline.py`} depth={1} />
           {outputChecks.map((c) => (
             <FnRow
@@ -264,6 +338,28 @@ export default function FlowPanel({ trace, busy, lastUser }) {
                   ? (c.categories || []).join(', ') || 'blocked'
                   : null
               }
+              depth={2}
+            />
+          ))}
+        </Section>
+      )}
+
+      {apiOutputReached && (
+        <Section title={`⑥ API_OUTPUT guardrails${blockedAt === 'api_output' ? ' — BLOCKED' : ''}`}>
+          <FnRow idx={next()} fn="RemoteGuardrailPipeline.check_api_output()" file="services/agent/app/guardrails_client.py" note="httpx -> guardrails:8001/v1/check (stage=api_output)" />
+          <FnRow idx={next()} fn="check()" file="guardrails-service/app/main.py" depth={1} note="FastAPI route POST /v1/check" />
+          <FnRow idx={next()} fn="GuardPipeline.check_api_output()" file={`${GUARDRAILS_BASE}pipeline.py`} depth={1} />
+          {apiOutputChecks.length === 0 && (
+            <FnRow idx={next()} fn="(no guards configured at api_output)" file="guardrails-service/app/policies/default.yaml" depth={2} note="add guards under `api_output:` to activate" />
+          )}
+          {apiOutputChecks.map((c) => (
+            <FnRow
+              key={`apiout-${c.guard}`}
+              idx={next()}
+              fn={`${classFor(c.guard)}.check()`}
+              file={`${GUARDRAILS_BASE}${GUARD_FILES[c.guard] || 'guards/?.py'}`}
+              decision={c.decision}
+              note={c.decision === 'block' ? (c.categories || []).join(', ') || 'blocked' : null}
               depth={2}
             />
           ))}
@@ -290,6 +386,8 @@ function classFor(name) {
   const overrides = {
     'azure-content-safety': 'AzureContentSafetyGuard',
     'azure-pii-detection': 'AzurePiiDetectionGuard',
+    'azure-groundedness': 'AzureGroundednessGuard',
+    'azure-task-adherence': 'AzureTaskAdherenceGuard',
   };
   if (overrides[name]) return overrides[name];
   const camel = (name || '')

@@ -2,7 +2,7 @@
 
 > **Audience:** Engineering + Compliance review meeting
 > **Scope:** Answers to the 12 team questions, anchored in the BankBuddy reference implementation in this repo and the Azure 8-layer plan in [guardrails-implementation-plan.md](guardrails-implementation-plan.md) / [guardrails-sdks-and-architecture.md](guardrails-sdks-and-architecture.md).
-> **Repo layout reminder:** the OSS guardrails service lives under [bankbuddy/services/guardrails](../bankbuddy/services/guardrails/), the agent integration under [bankbuddy/services/agent](../bankbuddy/services/agent/), and policies are YAML under [bankbuddy/services/guardrails/app/policies](../bankbuddy/services/guardrails/app/policies/).
+> **Repo layout reminder:** the OSS guardrails service lives under [guardrails-service](../guardrails-service/), the agent integration under [bankbuddy/services/agent](../bankbuddy/services/agent/), and policies are YAML under [guardrails-service/app/policies](../guardrails-service/app/policies/).
 
 ---
 
@@ -19,9 +19,9 @@
 
 **This repo (today):**
 
-- The agent's HTTP client passes a policy id to the guardrails service. See [services/agent/app/guardrails_client.py](../bankbuddy/services/agent/app/guardrails_client.py#L86-L100) — `policy_id="bankbuddy-default"` is sent on every request.
-- The guardrails service loads the matching YAML from [services/guardrails/app/policies/](../bankbuddy/services/guardrails/app/policies/) and builds the pipeline from it.
-- Auth is `Authorization: Bearer <token>` to the guardrails service ([guardrails_client.py#L100](../bankbuddy/services/agent/app/guardrails_client.py#L100)); in production this is replaced by APIM-issued JWT + Managed Identity.
+- The agent's HTTP client passes a policy id to the guardrails service. See [services/agent/app/guardrails_client.py](../bankbuddy/services/agent/app/guardrails_client.py) — `policy_id="bankbuddy-default"` is sent on every request.
+- The guardrails service loads the matching YAML from [guardrails-service/app/policies/](../guardrails-service/app/policies/) and builds the pipeline from it.
+- Auth is `Authorization: Bearer <token>` to the guardrails service ([services/agent/app/guardrails_client.py](../bankbuddy/services/agent/app/guardrails_client.py)); in production this is replaced by APIM-issued JWT + Managed Identity.
 
 ### 1.1 APIM + RAI policy architecture (end-to-end)
 
@@ -214,7 +214,7 @@ Bicep module + deployment pipeline: [guardrails-implementation-plan.md §Task 11
 
 ### (c) OSS analog in this repo
 
-Each YAML file under [bankbuddy/services/guardrails/app/policies/](../bankbuddy/services/guardrails/app/policies/) is a "policy bundle." The default one [bankbuddy-default.yaml](../bankbuddy/services/guardrails/app/policies/bankbuddy-default.yaml) wires Azure Content Safety + Azure Language PII + custom guards into input and output pipelines.
+Each YAML file under [guardrails-service/app/policies/](../guardrails-service/app/policies/) is a "policy bundle." The default one [bankbuddy-default.yaml](../guardrails-service/app/policies/bankbuddy-default.yaml) wires Azure Content Safety + Azure Language PII + custom guards into input and output pipelines.
 
 ---
 
@@ -237,10 +237,10 @@ Everything is **policy-as-code**. No portal clicks.
 
 ### OSS pipeline (this repo)
 
-- Policy YAML under [bankbuddy/services/guardrails/app/policies/](../bankbuddy/services/guardrails/app/policies/) — versioned with the service code.
-- Each guard has `enabled: true|false` plus per-guard config inline. Loader in [policies/loader.py](../bankbuddy/services/guardrails/app/policies/loader.py#L45-L70) drops disabled guards before the pipeline is built.
-- Reload protocol: `docker compose up -d --force-recreate guardrails` (header comment in [bankbuddy-default.yaml](../bankbuddy/services/guardrails/app/policies/bankbuddy-default.yaml#L1-L17)).
-- New guard registration: drop a file in [services/guardrails/app/core/guards/](../bankbuddy/services/guardrails/app/core/guards/), add it to [guards/__init__.py](../bankbuddy/services/guardrails/app/core/guards/__init__.py), reference it by hyphenated name in the policy YAML. Authoring guide: [bankbuddy/docs/guardrails.md §5](../bankbuddy/docs/guardrails.md).
+- Policy YAML under [guardrails-service/app/policies/](../guardrails-service/app/policies/) — versioned with the service code.
+- Each guard has `enabled: true|false` plus per-guard config inline. Loader in [policies/loader.py](../guardrails-service/app/policies/loader.py#L45-L70) drops disabled guards before the pipeline is built.
+- Reload protocol: `docker compose up -d --force-recreate guardrails` (header comment in [bankbuddy-default.yaml](../guardrails-service/app/policies/bankbuddy-default.yaml#L1-L17)).
+- New guard registration: drop a file in [guardrails-service/app/core/guards/](../guardrails-service/app/core/guards/), add it to [guards/__init__.py](../guardrails-service/app/core/guards/__init__.py), reference it by hyphenated name in the policy YAML. Authoring guide: [bankbuddy/docs/guardrails.md §5](../bankbuddy/docs/guardrails.md).
 
 ---
 
@@ -255,8 +255,8 @@ Everything is **policy-as-code**. No portal clicks.
 
 **This repo proves the GaaS pattern.** The agent talks to a separate guardrails container over HTTP:
 
-- Agent side: [RemoteGuardrailPipeline](../bankbuddy/services/agent/app/guardrails_client.py#L88) — same `check_input` / `check_output` surface as the local pipeline so providers stay unchanged.
-- Service side: [services/guardrails](../bankbuddy/services/guardrails/) hosts the guards, policies, and Azure SDK calls.
+- Agent side: [RemoteGuardrailPipeline](../bankbuddy/services/agent/app/guardrails_client.py) — same `check_input` / `check_output` surface as the local pipeline so providers stay unchanged.
+- Service side: [services/guardrails](../guardrails-service/) hosts the guards, policies, and Azure SDK calls.
 - A flip of one env var in the agent switches between in-process and remote — same contract.
 
 Rule of thumb: **business-logic guards inline, compliance/safety guards as-a-service.**
@@ -271,11 +271,11 @@ PII / PHI / secrets get three chances:
 |---|---|---|
 | L2 APIM | `<send-request>` to Azure AI Language PII | Inbound pre-redact before app sees it |
 | L3 input | `azure-ai-textanalytics` `recognize_pii_entities(domain="phi")` + Presidio fallback | Strip PII / PHI before model call |
-| L3 (OSS) | [pii_detect.py](../bankbuddy/services/guardrails/app/core/guards/pii_detect.py) (regex) + [azure_pii_detection.py](../bankbuddy/services/guardrails/app/core/guards/azure_pii_detection.py) | Same, in the OSS pipeline |
+| L3 (OSS) | [pii_detect.py](../guardrails-service/app/core/guards/pii_detect.py) (regex) + [azure_pii_detection.py](../guardrails-service/app/core/guards/azure_pii_detection.py) | Same, in the OSS pipeline |
 | L7 | Content Safety blocklist regexes for SSN / account # / IBAN | Catches templated leaks the LLM might emit |
-| L8 output | `recognize_pii_entities` on response + [output_pii_redact.py](../bankbuddy/services/guardrails/app/core/guards/output_pii_redact.py) + [secret_leak.py](../bankbuddy/services/guardrails/app/core/guards/secret_leak.py) | Last line — masks SSN/card/IBAN, blocks AWS keys, GitHub PATs, JWTs, OpenAI keys, private keys, bearer tokens |
+| L8 output | `recognize_pii_entities` on response + [output_pii_redact.py](../guardrails-service/app/core/guards/output_pii_redact.py) + [secret_leak.py](../guardrails-service/app/core/guards/secret_leak.py) | Last line — masks SSN/card/IBAN, blocks AWS keys, GitHub PATs, JWTs, OpenAI keys, private keys, bearer tokens |
 
-**Default policy already wires both stages** — [bankbuddy-default.yaml](../bankbuddy/services/guardrails/app/policies/bankbuddy-default.yaml#L40-L96):
+**Default policy already wires both stages** — [bankbuddy-default.yaml](../guardrails-service/app/policies/bankbuddy-default.yaml#L40-L96):
 
 ```yaml
 input:
@@ -313,9 +313,9 @@ L8 is the layer that "detects leaks" specifically (post-model). L2 / L3 prevent 
 
 **Concrete examples in this repo:**
 
-- Pure rule guard: [token_limit.py](../bankbuddy/services/guardrails/app/core/guards/token_limit.py), [secret_leak.py](../bankbuddy/services/guardrails/app/core/guards/secret_leak.py).
-- Heuristic guard: [prompt_injection.py](../bankbuddy/services/guardrails/app/core/guards/prompt_injection.py).
-- SLM-backed guard: [azure_content_safety.py](../bankbuddy/services/guardrails/app/core/guards/azure_content_safety.py), [azure_pii_detection.py](../bankbuddy/services/guardrails/app/core/guards/azure_pii_detection.py).
+- Pure rule guard: [token_limit.py](../guardrails-service/app/core/guards/token_limit.py), [secret_leak.py](../guardrails-service/app/core/guards/secret_leak.py).
+- Heuristic guard: [prompt_injection.py](../guardrails-service/app/core/guards/prompt_injection.py).
+- SLM-backed guard: [azure_content_safety.py](../guardrails-service/app/core/guards/azure_content_safety.py), [azure_pii_detection.py](../guardrails-service/app/core/guards/azure_pii_detection.py).
 
 Headline: regex/rules where they suffice, SLMs from Azure Content Safety / Language at L3 / L5 / L8, LLM-judges only for groundedness and offline eval (cost reasons).
 
@@ -338,7 +338,7 @@ Single sink, structured, correlated by `request-id` + `x-policy-id`.
 
 ### OSS side
 
-Every guard returns a `GuardCheckResult` with `guard_name / decision / reasons / categories / score / metadata` — see [guardrails_client.py#L56-L66](../bankbuddy/services/agent/app/guardrails_client.py#L56-L66). The full `PipelineResult` (with `duration_ms` and the list of checks) is attached to `AgentInvokeResponse.metadata.guardrails` and shipped to App Insights — never returned to the user. The user sees only `GUARDRAILS_BLOCK_MESSAGE`.
+Every guard returns a `GuardCheckResult` with `guard_name / decision / reasons / categories / score / metadata` — see [services/agent/app/guardrails_client.py](../bankbuddy/services/agent/app/guardrails_client.py). The full `PipelineResult` (with `duration_ms` and the list of checks) is attached to `AgentInvokeResponse.metadata.guardrails` and shipped to App Insights — never returned to the user. The user sees only `GUARDRAILS_BLOCK_MESSAGE`.
 
 ---
 
@@ -348,10 +348,10 @@ The agent **does not pick.** The orchestration picks based on lifecycle position
 
 **This repo, concretely:**
 
-- Each guard declares its stage as a class attribute (`stage = GuardStage.INPUT | OUTPUT | TOOL_OUTPUT | BOTH`) — see [guardrails_client.py#L46-L51](../bankbuddy/services/agent/app/guardrails_client.py#L46-L51).
-- The policy YAML has explicit `input:` / `output:` / `tool_output:` sections — [bankbuddy-default.yaml](../bankbuddy/services/guardrails/app/policies/bankbuddy-default.yaml#L23-L96). The loader builds three independent pipelines.
+- Each guard declares its stage as a class attribute (`stage = GuardStage.INPUT | OUTPUT | TOOL_OUTPUT | BOTH`) — see [services/agent/app/guardrails_client.py](../bankbuddy/services/agent/app/guardrails_client.py).
+- The policy YAML has explicit `input:` / `output:` / `tool_output:` sections — [bankbuddy-default.yaml](../guardrails-service/app/policies/bankbuddy-default.yaml#L23-L96). The loader builds three independent pipelines.
 - The agent calls `pipeline.check_input(text)` **before** the LLM, `pipeline.check_tool_output(json)` **before each tool result is fed back**, and `pipeline.check_output(reply)` **after** the LLM. There's no "agent picks a guard" decision point.
-- Tool-output stage skips the HTTP round-trip entirely if no tool-output guards are configured — see [guardrails_client.py#L172-L188](../bankbuddy/services/agent/app/guardrails_client.py#L172-L188).
+- Tool-output stage skips the HTTP round-trip entirely if no tool-output guards are configured — see [services/agent/app/guardrails_client.py](../bankbuddy/services/agent/app/guardrails_client.py).
 - Per-tenant variations are handled by selecting a different policy YAML (different `policy_id`) — same agent code, different guard set.
 
 For Azure GaaS the same principle applies: APIM/middleware orchestrates, calling `analyze_text(category=Prompt)` on input and `analyze_text(category=Completion) + detect_groundedness + detect_protected_material` on output. The SDK call site, not the agent, decides stage.
@@ -369,7 +369,7 @@ Four layers, ordered cheapest-first:
 3. **Optional inline LLM-judge guard** for high-stakes flows (advisory). Add a custom guard that calls a small judge model with `(response, sources)` and blocks below a threshold. Adds one LLM round-trip — only enable on the `strict-production` policy.
 4. **Offline / CI** — `azure-ai-evaluation.GroundednessEvaluator` runs nightly against the 64-case adversarial harness; threshold gates promotion.
 
-**Implementation hook in this repo:** add a `groundedness` guard under [services/guardrails/app/core/guards/](../bankbuddy/services/guardrails/app/core/guards/) following the [azure_content_safety.py](../bankbuddy/services/guardrails/app/core/guards/azure_content_safety.py) pattern, register in `guards/__init__.py`, reference from the OUTPUT section of the policy YAML. The grounding sources travel through the per-call `context` dict already plumbed in `check_output(text, context=...)`.
+**Implementation hook in this repo:** add a `groundedness` guard under [guardrails-service/app/core/guards/](../guardrails-service/app/core/guards/) following the [azure_content_safety.py](../guardrails-service/app/core/guards/azure_content_safety.py) pattern, register in `guards/__init__.py`, reference from the OUTPUT section of the policy YAML. The grounding sources travel through the per-call `context` dict already plumbed in `check_output(text, context=...)`.
 
 ---
 
@@ -377,9 +377,9 @@ Four layers, ordered cheapest-first:
 
 ### Fail fast — block decisions are terminal
 
-- A guard returning `BLOCK` short-circuits the pipeline; no further guards run, no LLM call. See `PipelineResult.allowed` flag — [guardrails_client.py#L69-L82](../bankbuddy/services/agent/app/guardrails_client.py#L69-L82).
+- A guard returning `BLOCK` short-circuits the pipeline; no further guards run, no LLM call. See `PipelineResult.allowed` flag — [services/agent/app/guardrails_client.py](../bankbuddy/services/agent/app/guardrails_client.py).
 - APIM rejects on missing JWT, unknown `x-policy-id`, rate-limit breach before the agent sees the request.
-- Per-guard timeouts (5 s default in this repo — [guardrails_client.py#L94](../bankbuddy/services/agent/app/guardrails_client.py#L94)). On timeout/5xx/unreachable:
+- Per-guard timeouts (5 s default in this repo — [services/agent/app/guardrails_client.py](../bankbuddy/services/agent/app/guardrails_client.py)). On timeout/5xx/unreachable:
 
 | Stage | Failure mode | Why |
 |---|---|---|
@@ -387,7 +387,7 @@ Four layers, ordered cheapest-first:
 | OUTPUT | **Fail-open (ALLOW + log)** | Never let a degraded service hold a clean answer hostage |
 | TOOL_OUTPUT | **Fail-open** | Same as OUTPUT; operators disable the affected tool at agent level if they need fail-closed |
 
-This split is documented at the top of [guardrails_client.py#L11-L18](../bankbuddy/services/agent/app/guardrails_client.py#L11-L18) and is locked-in policy.
+This split is documented at the top of [services/agent/app/guardrails_client.py](../bankbuddy/services/agent/app/guardrails_client.py) and is locked-in policy.
 
 - Guards must **never raise** — base class contract. A throwing guard is treated as `ALLOW` and logged.
 
@@ -453,8 +453,8 @@ Layered, executable today on this repo:
 | Azure 8-layer plan | [docs/guardrails-implementation-plan.md](guardrails-implementation-plan.md) |
 | SDK / package matrix + diagrams | [docs/guardrails-sdks-and-architecture.md](guardrails-sdks-and-architecture.md) |
 | OSS guardrails authoring guide | [bankbuddy/docs/guardrails.md](../bankbuddy/docs/guardrails.md) |
-| Default policy YAML | [bankbuddy/services/guardrails/app/policies/bankbuddy-default.yaml](../bankbuddy/services/guardrails/app/policies/bankbuddy-default.yaml) |
-| Policy loader | [bankbuddy/services/guardrails/app/policies/loader.py](../bankbuddy/services/guardrails/app/policies/loader.py) |
-| Built-in guards | [bankbuddy/services/guardrails/app/core/guards/](../bankbuddy/services/guardrails/app/core/guards/) |
+| Default policy YAML | [guardrails-service/app/policies/bankbuddy-default.yaml](../guardrails-service/app/policies/bankbuddy-default.yaml) |
+| Policy loader | [guardrails-service/app/policies/loader.py](../guardrails-service/app/policies/loader.py) |
+| Built-in guards | [guardrails-service/app/core/guards/](../guardrails-service/app/core/guards/) |
 | Agent → guardrails client (fail modes documented) | [bankbuddy/services/agent/app/guardrails_client.py](../bankbuddy/services/agent/app/guardrails_client.py) |
 | Tests | [bankbuddy/tests/](../bankbuddy/tests/) |

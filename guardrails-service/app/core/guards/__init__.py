@@ -1,8 +1,9 @@
 """Built-in guards. Importing this package registers all guards."""
 from . import (
     azure_content_safety,     # noqa: F401  (Azure AI Content Safety - default)
+    azure_groundedness,       # noqa: F401  (Azure managed groundedness)
     azure_pii_detection,      # noqa: F401  (Azure AI Language PII)
-    banking_relevance,        # noqa: F401  (custom example)
+    azure_task_adherence,     # noqa: F401  (Azure managed task adherence)
     banned_substrings,        # noqa: F401
     bias_detect,              # noqa: F401  (stereotype / demographic skew)
     competitor_mentions,      # noqa: F401
@@ -13,5 +14,6 @@ from . import (
     secret_leak,              # noqa: F401
     task_adherence,           # noqa: F401  (runtime task-scope enforcement)
     token_limit,              # noqa: F401
+    topic_relevance,          # noqa: F401  (custom-guard reference impl)
     toxicity,                 # noqa: F401
 )

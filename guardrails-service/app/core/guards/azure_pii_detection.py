@@ -102,35 +102,35 @@ class AzurePiiDetectionGuard(Guard):
     # ------------------------------------------------------------------
 
     def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self.timeout_seconds)
-        return self._client
+        from ..azure_http import get_client
+        return get_client(timeout=self.timeout_seconds)
 
     async def aclose(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        return None
 
-    def _auth_headers(self) -> dict[str, str]:
+    def _auth_headers_sync(self) -> dict[str, str] | None:
         if self.api_key:
             return {"Ocp-Apim-Subscription-Key": self.api_key}
-
         token = (
             os.getenv("AZURE_LANGUAGE_AAD_TOKEN")
             or os.getenv("AZURE_CONTENT_SAFETY_AAD_TOKEN")
         )
         if token:
             return {"Authorization": f"Bearer {token}"}
+        return None
 
-        try:  # pragma: no cover - best-effort
-            if self._aad_credential is None:
-                from azure.identity import DefaultAzureCredential  # type: ignore
-                self._aad_credential = DefaultAzureCredential()
-            access = self._aad_credential.get_token(_AAD_SCOPE)
-            return {"Authorization": f"Bearer {access.token}"}
+    async def _auth_headers(self) -> dict[str, str]:
+        fast = self._auth_headers_sync()
+        if fast is not None:
+            return fast
+        try:
+            from ..aad_cache import get_bearer_token
+            token = await get_bearer_token(_AAD_SCOPE)
+            if token:
+                return {"Authorization": f"Bearer {token}"}
         except Exception as e:  # noqa: BLE001
             log.warning("azure-pii-detection: AAD auth unavailable: %r", e)
-            return {}
+        return {}
 
     # ------------------------------------------------------------------
 
@@ -141,7 +141,7 @@ class AzurePiiDetectionGuard(Guard):
         if not self.endpoint:
             return self._fail(text, reason="no endpoint configured")
 
-        headers = {"Content-Type": "application/json", **self._auth_headers()}
+        headers = {"Content-Type": "application/json", **(await self._auth_headers())}
         if "Ocp-Apim-Subscription-Key" not in headers and "Authorization" not in headers:
             return self._fail(text, reason="no credentials available")
 

@@ -29,6 +29,10 @@ services:
     image: postgres:16-alpine
     container_name: bankbuddy-postgres
     restart: unless-stopped
+    ports:
+      # Published to host for local DB tools (pgAdmin / Azure Data Studio).
+      # Override host port via POSTGRES_HOST_PORT in .env if 5432 is in use.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-bankbuddy}
       POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
@@ -77,8 +81,11 @@ services:
   # ---------------------------------------------------------------------------
   guardrails:
     build:
-      context: .
-      dockerfile: services/guardrails/Dockerfile
+      # Build from the standalone guardrails-service repo at the workspace root.
+      # The in-tree bankbuddy/services/guardrails/ copy has been removed.
+      context: ../guardrails-service
+      dockerfile: Dockerfile
+    image: bankbuddy-guardrails:dev
     container_name: bankbuddy-guardrails
     restart: unless-stopped
     env_file:
@@ -89,6 +96,16 @@ services:
       # here so only this container needs Azure credentials.
       AZURE_CONTENT_SAFETY_AAD_TOKEN: ${AZURE_CONTENT_SAFETY_AAD_TOKEN:-}
       AZURE_LANGUAGE_AAD_TOKEN: ${AZURE_LANGUAGE_AAD_TOKEN:-${AZURE_CONTENT_SAFETY_AAD_TOKEN:-}}
+      # Load both the service-bundled `default.yaml` AND BankBuddy's own
+      # `bankbuddy-default.yaml` (mounted below). The guardrails-service
+      # itself is domain-neutral; banking policy lives with the consumer.
+      GUARDRAILS_POLICIES_DIR: /app/app/policies:/policies-extra
+      # Optional per-tenant blocklist phrases as a JSON array string,
+      # consumed by `banned-substrings` via ${BANNED_PHRASES_JSON} in YAML.
+      # e.g. BANNED_PHRASES_JSON='["wire all funds","project zenith"]'
+      BANNED_PHRASES_JSON: ${BANNED_PHRASES_JSON:-[]}
+    volumes:
+      - ./policies:/policies-extra:ro
     networks:
       - internal
     healthcheck:

@@ -43,6 +43,9 @@ COGNITIVE_SERVICES_AAD_SCOPE = "https://cognitiveservices.azure.com/.default"
 
 CONTENT_SAFETY_SHIELD_PROMPT_PATH = "/contentsafety/text:shieldPrompt"
 CONTENT_SAFETY_TEXT_ANALYZE_PATH = "/contentsafety/text:analyze"
+CONTENT_SAFETY_PROTECTED_MATERIAL_PATH = "/contentsafety/text:detectProtectedMaterial"
+CONTENT_SAFETY_GROUNDEDNESS_PATH = "/contentsafety/text:detectGroundedness"
+CONTENT_SAFETY_TASK_ADHERENCE_PATH = "/contentsafety/text:detectTaskAdherence"
 LANGUAGE_ANALYZE_TEXT_PATH = "/language/:analyze-text"
 
 
@@ -71,6 +74,45 @@ def content_safety_text_analyze_url(
     """Harm categories: Hate / SelfHarm / Sexual / Violence (INPUT + OUTPUT)."""
     return (
         f"{_normalize(endpoint)}{CONTENT_SAFETY_TEXT_ANALYZE_PATH}"
+        f"?api-version={api_version}"
+    )
+
+
+def content_safety_protected_material_url(
+    endpoint: str, api_version: str = CONTENT_SAFETY_API_VERSION
+) -> str:
+    """Protected Material detection: copyrighted text (OUTPUT).
+
+    Docs: https://learn.microsoft.com/azure/ai-services/content-safety/quickstart-protected-material
+    """
+    return (
+        f"{_normalize(endpoint)}{CONTENT_SAFETY_PROTECTED_MATERIAL_PATH}"
+        f"?api-version={api_version}"
+    )
+
+
+def content_safety_groundedness_url(
+    endpoint: str, api_version: str = CONTENT_SAFETY_API_VERSION
+) -> str:
+    """Azure managed Groundedness detection (OUTPUT, requires sources).
+
+    Docs: https://learn.microsoft.com/azure/ai-services/content-safety/quickstart-groundedness
+    """
+    return (
+        f"{_normalize(endpoint)}{CONTENT_SAFETY_GROUNDEDNESS_PATH}"
+        f"?api-version={api_version}"
+    )
+
+
+def content_safety_task_adherence_url(
+    endpoint: str, api_version: str = CONTENT_SAFETY_API_VERSION
+) -> str:
+    """Azure managed Task Adherence detection (OUTPUT, agent task scope).
+
+    Docs: https://learn.microsoft.com/azure/ai-services/content-safety/concepts/task-adherence
+    """
+    return (
+        f"{_normalize(endpoint)}{CONTENT_SAFETY_TASK_ADHERENCE_PATH}"
         f"?api-version={api_version}"
     )
 

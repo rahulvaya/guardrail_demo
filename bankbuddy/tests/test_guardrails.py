@@ -1,8 +1,8 @@
 """Unit + integration tests for the guardrails framework.
 
 Run with:
-    cd bankbuddy/services/guardrails
-    python -m pytest ../../tests/test_guardrails.py -v
+    cd guardrails-service
+    python -m pytest ../bankbuddy/tests/test_guardrails.py -v
 
 Each test is intentionally hermetic: no LLM calls, no network, no DB.
 """

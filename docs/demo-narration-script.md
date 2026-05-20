@@ -175,7 +175,7 @@ docker exec -e TOK=$env:TOK bankbuddy-agent python /tmp/smoke_guardrails.py
 
 ---
 
-**[SHOW]** `bankbuddy/services/guardrails/app/policies/bankbuddy-default.yaml` in the editor.
+**[SHOW]** `guardrails-service/app/policies/bankbuddy-default.yaml` in the editor.
 
 **[SAY]**
 > And the most important file in the entire system is this one - the policy YAML. Every guard, every threshold, every toggle is declared here. Flip enabled true to false, recreate one container, you're done. No code change. No deployment. A risk officer can read this file - that's the goal. Policy is data, owned by the people responsible for risk, not buried in a Python module.

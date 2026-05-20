@@ -14,7 +14,9 @@ Endpoints:
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -25,7 +27,13 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from .api import CheckRequest, CheckResponse, GuardOutcome, PolicySummary
 from .auth import require_bearer
 from .core.pipeline import GuardrailPipeline
-from .policies.loader import Policy, build_pipeline, load_policies
+from .policies.loader import (
+    Policy,
+    build_pipeline,
+    build_pipeline_with_overrides,
+    load_policies,
+    validate_request_overrides,
+)
 from .settings import get_settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -55,6 +63,23 @@ async def lifespan(app: FastAPI):
 
     app.state.policies = policies
     app.state.pipelines = pipelines
+    # Cache for per-request override pipelines, keyed by
+    # (policy_id, canonical-JSON of overrides). Bounded by guard-config
+    # cardinality (overridable_keys is small) so unbounded growth is not
+    # a realistic DoS vector for internal callers.
+    app.state.override_pipelines = {}
+
+    # Prewarm one TCP+TLS (+HTTP/2) connection to the Azure Cognitive
+    # Services endpoint so the first user prompt doesn't pay handshake
+    # latency across multiple guards.
+    cs_endpoint = os.getenv("AZURE_CONTENT_SAFETY_ENDPOINT") or os.getenv("AZURE_LANGUAGE_ENDPOINT")
+    if cs_endpoint:
+        try:
+            from .core.azure_http import prewarm
+            await prewarm(cs_endpoint)
+        except Exception:  # noqa: BLE001
+            log.debug("azure-http prewarm failed", exc_info=True)
+
     try:
         yield
     finally:
@@ -63,9 +88,19 @@ async def lifespan(app: FastAPI):
                 await p.aclose()
             except Exception:  # noqa: BLE001
                 log.debug("error closing pipeline", exc_info=True)
+        for p in app.state.override_pipelines.values():
+            try:
+                await p.aclose()
+            except Exception:  # noqa: BLE001
+                log.debug("error closing override pipeline", exc_info=True)
+        try:
+            from .core.azure_http import aclose as _azure_http_aclose
+            await _azure_http_aclose()
+        except Exception:  # noqa: BLE001
+            log.debug("error closing shared azure http client", exc_info=True)
 
 
-app = FastAPI(title="BankBuddy Guardrails", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Guardrails Service", version="1.0.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -107,9 +142,12 @@ def list_policies() -> dict[str, list[PolicySummary]]:
         PolicySummary(
             id=p.id,
             description=p.description,
+            api_input_guards=p.api_input_guard_names,
             input_guards=p.input_guard_names,
+            tool_input_guards=p.tool_input_guard_names,
             output_guards=p.output_guard_names,
             tool_output_guards=p.tool_output_guard_names,
+            api_output_guards=p.api_output_guard_names,
         )
         for p in app.state.policies.values()
     ]
@@ -135,21 +173,67 @@ def get_policy(policy_id: str) -> dict[str, Any]:
 )
 async def check(req: CheckRequest) -> CheckResponse:
     pid = req.policy_id or settings.default_policy_id
-    pipeline: GuardrailPipeline | None = app.state.pipelines.get(pid)
-    if pipeline is None:
+    policy: Policy | None = app.state.policies.get(pid)
+    if policy is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
             f"unknown policy: {pid}. Loaded: {sorted(app.state.pipelines.keys())}",
         )
 
+    # Choose pipeline: default (no overrides) or override-merged + cached.
+    pipeline: GuardrailPipeline | None
+    if req.overrides:
+        if not settings.allow_request_overrides:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "per-request overrides are disabled (GUARDRAILS_ALLOW_REQUEST_OVERRIDES=false)",
+            )
+        errors = validate_request_overrides(
+            req.overrides,
+            policy,
+            settings.overridable_keys_set(),
+            settings.forbidden_override_keys_set(),
+        )
+        if errors:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, {"errors": errors})
+
+        cache_key = (pid, json.dumps(req.overrides, sort_keys=True, default=str))
+        pipeline = app.state.override_pipelines.get(cache_key)
+        if pipeline is None:
+            pipeline = build_pipeline_with_overrides(policy, req.overrides)
+            app.state.override_pipelines[cache_key] = pipeline
+            log.info("built override pipeline for policy=%s overrides=%s", pid, req.overrides)
+    else:
+        pipeline = app.state.pipelines.get(pid)
+        if pipeline is None:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                f"policy {pid} known but pipeline failed to build at boot",
+            )
+
     request_id = str(uuid.uuid4())
     started = time.perf_counter()
 
-    if req.stage == "input":
+    # Aliases: callers may send llm_input/llm_output for clarity; map to the
+    # canonical INPUT / OUTPUT pipelines so the existing 3-stage policy still
+    # works without renames.
+    stage = req.stage
+    if stage == "llm_input":
+        stage = "input"
+    elif stage == "llm_output":
+        stage = "output"
+
+    if stage == "api_input":
+        pr = await pipeline.check_api_input(req.text, context=req.context)
+    elif stage == "input":
         pr = await pipeline.check_input(req.text, context=req.context)
-    elif req.stage == "tool_output":
+    elif stage == "tool_input":
+        pr = await pipeline.check_tool_input(req.text, context=req.context)
+    elif stage == "tool_output":
         pr = await pipeline.check_tool_output(req.text, context=req.context)
-    else:
+    elif stage == "api_output":
+        pr = await pipeline.check_api_output(req.text, context=req.context)
+    else:  # "output"
         pr = await pipeline.check_output(req.text, context=req.context)
 
     decision: str

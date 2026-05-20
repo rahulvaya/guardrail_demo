@@ -37,7 +37,9 @@ wheels/
 *.egg
 MANIFEST
 .venv/
+.venv-*/
 venv/
+venv-*/
 env/
 ENV/
 .pytest_cache/

@@ -18,19 +18,54 @@ class GuardDecision(str, Enum):
 class GuardStage(str, Enum):
     """Where in the pipeline a guard runs.
 
-    INPUT       - on the user's message before it reaches the LLM.
-    OUTPUT      - on the LLM's final assistant reply before it leaves the agent.
-    TOOL_OUTPUT - on the JSON returned by each tool call before it is fed
-                  back to the LLM as a `role: "tool"` message. Catches
-                  injected instructions, PII, and secret leaks coming from
-                  downstream services.
-    BOTH        - guard self-classifies as both input and output.
+    Six explicit checkpoints (architecture diagram ①…⑥):
+
+      ① API_INPUT    - request entering the public FastAPI / chat API.
+      ② INPUT        - user message about to be sent to the LLM.
+                       (alias: llm_input)
+      ③ OUTPUT       - LLM reply on its way back to the orchestrator.
+                       (alias: llm_output)
+      ④ TOOL_INPUT   - planned tool call (name + arguments) about to be
+                       executed against an external API / function.
+      ⑤ TOOL_OUTPUT  - JSON returned by a tool before it is fed back to
+                       the LLM as a `role: "tool"` message.
+      ⑥ API_OUTPUT   - final assistant reply about to leave the public API.
+
+      BOTH          - guard self-classifies as both input- and output-family.
+
+    Input-family  = {API_INPUT, INPUT, TOOL_INPUT}
+    Output-family = {OUTPUT, TOOL_OUTPUT, API_OUTPUT}
     """
 
+    API_INPUT = "api_input"
     INPUT = "input"
+    TOOL_INPUT = "tool_input"
     OUTPUT = "output"
     TOOL_OUTPUT = "tool_output"
+    API_OUTPUT = "api_output"
     BOTH = "both"
+
+
+INPUT_FAMILY: frozenset[GuardStage] = frozenset(
+    {GuardStage.API_INPUT, GuardStage.INPUT, GuardStage.TOOL_INPUT}
+)
+OUTPUT_FAMILY: frozenset[GuardStage] = frozenset(
+    {GuardStage.OUTPUT, GuardStage.TOOL_OUTPUT, GuardStage.API_OUTPUT}
+)
+
+
+def is_input_family(stage: GuardStage | str) -> bool:
+    try:
+        return GuardStage(stage) in INPUT_FAMILY
+    except ValueError:
+        return False
+
+
+def is_output_family(stage: GuardStage | str) -> bool:
+    try:
+        return GuardStage(stage) in OUTPUT_FAMILY
+    except ValueError:
+        return False
 
 
 @dataclass

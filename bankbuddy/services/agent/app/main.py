@@ -129,7 +129,7 @@ def list_guards() -> dict[str, Any]:
 class GuardCheckRequest(BaseModel):
     text: str
     stage: str = "input"     # "input" | "output"
-    guard: str | None = None  # if set, run only that guard; otherwise the full stage pipeline
+    guard: str | None = None  # if set, return only that guard's outcome from the full stage run
 
 
 @app.post("/internal/guardrails/check", dependencies=[Depends(_require_internal_token)])
@@ -137,35 +137,36 @@ async def check_guards(body: GuardCheckRequest) -> dict[str, Any]:
     """Run guardrails on arbitrary text without invoking the LLM.
 
     Use this to validate config changes, reproduce production blocks, or
-    debug a specific guard in isolation.
+    debug a specific guard in isolation. Since the pipeline is now a
+    remote service, single-guard execution is implemented by running the
+    full stage and filtering the per-guard outcomes client-side.
     """
     pipeline = app.state.guardrails
     stage = body.stage.lower()
     if stage not in ("input", "output"):
         raise HTTPException(400, "stage must be 'input' or 'output'")
 
+    pr = await (pipeline.check_input(body.text) if stage == "input" else pipeline.check_output(body.text))
+
     if body.guard is not None:
-        guards = pipeline.input_guards if stage == "input" else pipeline.output_guards
-        match = next((g for g in guards if g.name == body.guard), None)
+        match = next((c for c in pr.checks if c.guard_name == body.guard), None)
         if match is None:
+            active = [c.guard_name for c in pr.checks]
             raise HTTPException(
                 404,
-                f"guard {body.guard!r} not active in stage {stage!r}. "
-                f"Active: {[g.name for g in guards]}",
+                f"guard {body.guard!r} did not run in stage {stage!r}. Active: {active}",
             )
-        result = await match.check(body.text)
         return {
             "stage": stage,
-            "guard": match.name,
-            "decision": result.decision.value,
-            "sanitized_text": result.sanitized_text,
-            "reasons": result.reasons,
-            "categories": result.categories,
-            "score": result.score,
-            "metadata": result.metadata,
+            "guard": match.guard_name,
+            "decision": match.decision.value,
+            "sanitized_text": match.sanitized_text,
+            "reasons": match.reasons,
+            "categories": match.categories,
+            "score": match.score,
+            "metadata": match.metadata,
         }
 
-    pr = await (pipeline.check_input(body.text) if stage == "input" else pipeline.check_output(body.text))
     return {
         "stage": stage,
         "allowed": pr.allowed,
