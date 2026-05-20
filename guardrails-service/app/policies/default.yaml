@@ -138,6 +138,35 @@ api_input:
       allow_overrides: true
       phrases: ${BANNED_PHRASES_JSON:[]}
 
+  # ---- Reference entries: all remaining registered guards listed with
+  # ---- enabled: false so this stage can serve as a copy-paste template.
+  # ---- Most of these are output-side checks; flip on only if your
+  # ---- threat model requires them on the public-API entry point.
+  - pii-detect:              # local regex PII fallback (input-safe)
+      enabled: false
+      mode: block
+  - output-pii-redact:       # output-only by design; off on input
+      enabled: false
+  - secret-leak:             # G-05; flip on to reject leaked creds in prompts
+      enabled: false
+  - azure-task-adherence:    # G-03a; usually checked on output / tool_input
+      enabled: false
+      require_task_definition: false
+  - azure-groundedness:      # output-only (needs LLM reply + sources)
+      enabled: false
+  - competitor-mentions:     # usually output
+      enabled: false
+      # competitors: ["acme corp"]
+  - toxicity:                # usually output; can pre-filter abusive prompts
+      enabled: false
+  - bias-detect:             # usually output
+      enabled: false
+      engine: lexicon
+  - groundedness:            # output-only (needs reply + sources)
+      enabled: false
+  - task-adherence:          # local heuristic; output-side
+      enabled: false
+
 # ---------------------------------------------------------------------------
 # ④ TOOL_INPUT  — planned tool call before execution. Validates the tool
 # name + arguments the LLM produced; defends external APIs from injection
@@ -160,6 +189,44 @@ tool_input:
       mode: sanitize
   - secret-leak:             # G-05 Sensitive Data Filter
       enabled: true
+
+  # ---- Reference entries: all remaining registered guards listed with
+  # ---- enabled: false. Flip on per your tool surface.
+  - azure-content-safety:    # harm categories on outbound tool args
+      enabled: false
+      severity_threshold: 2
+      fail_open: true
+      timeout_seconds: 3
+  - azure-topic-relevance:   # scope check on tool args
+      enabled: false
+      categories: []
+      severity_threshold: 2
+      fail_open: true
+  - azure-groundedness:      # output-only (needs sources)
+      enabled: false
+  - prompt-injection:        # block injection text in synthesised tool args
+      enabled: false
+  - output-pii-redact:       # output-only by design
+      enabled: false
+  - banned-substrings:
+      enabled: false
+      case_sensitive: false
+      allow_overrides: true
+      phrases: ${BANNED_PHRASES_JSON:[]}
+  - topic-relevance:         # local scope fallback
+      enabled: false
+      # keywords: ["account","balance","loan","card","atm"]
+  - competitor-mentions:
+      enabled: false
+  - toxicity:
+      enabled: false
+  - bias-detect:
+      enabled: false
+      engine: lexicon
+  - groundedness:            # output-only
+      enabled: false
+  - task-adherence:          # output-only
+      enabled: false
 
 # ---------------------------------------------------------------------------
 # ⑥ API_OUTPUT  — last hop before the response leaves the public API.
@@ -191,6 +258,45 @@ api_output:
   - bias-detect:             # G-09 Bias Detection
       enabled: true
       engine: lexicon
+
+  # ---- Reference entries: all remaining registered guards listed with
+  # ---- enabled: false so this stage can serve as a copy-paste template.
+  - token-limit:             # reject oversized assistant replies
+      enabled: false
+      max_chars: 16000
+  - prompt-injection:        # catch injection text echoed back
+      enabled: false
+  - output-pii-redact:       # token-level PII redactor
+      enabled: false
+  - azure-groundedness:      # requires context.sources [+ .query for QnA]
+      enabled: false
+      domain: Generic
+      task: QnA
+      require_sources: false
+  - azure-task-adherence:    # requires context.task_definition
+      enabled: false
+      require_task_definition: false
+  - azure-topic-relevance:   # scope check on final reply (rare)
+      enabled: false
+      categories: []
+      severity_threshold: 2
+      fail_open: true
+  - topic-relevance:         # local scope fallback
+      enabled: false
+      # keywords: ["account","balance","loan","card","atm"]
+  - competitor-mentions:
+      enabled: false
+      # competitors: ["acme corp"]
+  - toxicity:
+      enabled: false
+  - groundedness:            # local overlap engine, no Azure dependency
+      enabled: false
+      engine: overlap
+      block_threshold: 0.45
+      warn_threshold: 0.65
+      require_sources: false
+  - task-adherence:          # local heuristic
+      enabled: false
 
 # ---------------------------------------------------------------------------
 # All registered guards are listed in EVERY stage below so operators can

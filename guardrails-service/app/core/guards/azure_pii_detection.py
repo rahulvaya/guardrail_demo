@@ -35,28 +35,20 @@ Configuration (env: ``GUARD_AZURE_PII_DETECTION_CONFIG`` JSON):
 """
 from __future__ import annotations
 
-import logging
-import os
 from typing import Any
 
-import httpx
-
-from ..base import Guard, GuardCheckResult, GuardStage
+from ..base import GuardCheckResult, GuardStage
 from ..registry import register_guard
+from ._azure_base import AzureGuardBase
 from .azure_endpoints import (
-    COGNITIVE_SERVICES_AAD_SCOPE,
     LANGUAGE_API_VERSION,
     language_analyze_text_url,
 )
 
-log = logging.getLogger("agent.guardrails.azure_pii_detection")
-
-DEFAULT_API_VERSION = LANGUAGE_API_VERSION
 DEFAULT_MIN_CONFIDENCE = 0.5
-_AAD_SCOPE = COGNITIVE_SERVICES_AAD_SCOPE
 
 
-class AzurePiiDetectionGuard(Guard):
+class AzurePiiDetectionGuard(AzureGuardBase):
     name = "azure-pii-detection"
     stage = GuardStage.BOTH
     description = (
@@ -64,19 +56,16 @@ class AzurePiiDetectionGuard(Guard):
         "email, phone, address, etc. in input/output and mask or block."
     )
 
+    DEFAULT_API_VERSION = LANGUAGE_API_VERSION
+    # Language-resource env vars win, with Content Safety as fallback so a
+    # single multi-service AI Services resource works out of the box.
+    ENDPOINT_ENV_VARS = ("AZURE_LANGUAGE_ENDPOINT", "AZURE_CONTENT_SAFETY_ENDPOINT")
+    KEY_ENV_VARS = ("AZURE_LANGUAGE_KEY", "AZURE_CONTENT_SAFETY_KEY")
+    AAD_TOKEN_ENV_VARS = ("AZURE_LANGUAGE_AAD_TOKEN", "AZURE_CONTENT_SAFETY_AAD_TOKEN")
+    CHECK_NAME = "language:PiiEntityRecognition"
+
     def __init__(self, **config: Any) -> None:
         super().__init__(**config)
-        self.endpoint: str = (
-            config.get("endpoint")
-            or os.getenv("AZURE_LANGUAGE_ENDPOINT")
-            or os.getenv("AZURE_CONTENT_SAFETY_ENDPOINT", "")
-        ).rstrip("/")
-        self.api_key: str = (
-            config.get("api_key")
-            or os.getenv("AZURE_LANGUAGE_KEY")
-            or os.getenv("AZURE_CONTENT_SAFETY_KEY", "")
-        )
-        self.api_version: str = config.get("api_version", DEFAULT_API_VERSION)
         self.language: str = str(config.get("language", "en"))
         self.mode: str = str(config.get("mode", "sanitize")).lower()
         self.min_confidence: float = float(
@@ -86,64 +75,11 @@ class AzurePiiDetectionGuard(Guard):
         self.exclude_categories: set[str] = {
             str(c) for c in config.get("exclude_categories", []) or []
         }
-        self.timeout_seconds: float = float(config.get("timeout_seconds", 5.0))
-        self.fail_open: bool = bool(config.get("fail_open", True))
-
-        self._aad_credential: Any = None
-        self._client: httpx.AsyncClient | None = None
-
-        if not self.endpoint:
-            log.warning(
-                "azure-pii-detection: no endpoint configured "
-                "(set AZURE_LANGUAGE_ENDPOINT); guard will fail-%s",
-                "open" if self.fail_open else "closed",
-            )
-
-    # ------------------------------------------------------------------
-
-    def _get_client(self) -> httpx.AsyncClient:
-        from ..azure_http import get_client
-        return get_client(timeout=self.timeout_seconds)
-
-    async def aclose(self) -> None:
-        return None
-
-    def _auth_headers_sync(self) -> dict[str, str] | None:
-        if self.api_key:
-            return {"Ocp-Apim-Subscription-Key": self.api_key}
-        token = (
-            os.getenv("AZURE_LANGUAGE_AAD_TOKEN")
-            or os.getenv("AZURE_CONTENT_SAFETY_AAD_TOKEN")
-        )
-        if token:
-            return {"Authorization": f"Bearer {token}"}
-        return None
-
-    async def _auth_headers(self) -> dict[str, str]:
-        fast = self._auth_headers_sync()
-        if fast is not None:
-            return fast
-        try:
-            from ..aad_cache import get_bearer_token
-            token = await get_bearer_token(_AAD_SCOPE)
-            if token:
-                return {"Authorization": f"Bearer {token}"}
-        except Exception as e:  # noqa: BLE001
-            log.warning("azure-pii-detection: AAD auth unavailable: %r", e)
-        return {}
-
-    # ------------------------------------------------------------------
 
     async def check(self, text: str, *, context: dict[str, Any] | None = None) -> GuardCheckResult:
-        if not text or not text.strip():
-            return self._allow(text)
-
-        if not self.endpoint:
-            return self._fail(text, reason="no endpoint configured")
-
-        headers = {"Content-Type": "application/json", **(await self._auth_headers())}
-        if "Ocp-Apim-Subscription-Key" not in headers and "Authorization" not in headers:
-            return self._fail(text, reason="no credentials available")
+        short_circuit, headers = await self._prepare_request(text)
+        if short_circuit is not None:
+            return short_circuit
 
         url = language_analyze_text_url(self.endpoint, self.api_version)
         payload = {
@@ -156,18 +92,11 @@ class AzurePiiDetectionGuard(Guard):
             },
         }
 
-        try:
-            resp = await self._get_client().post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            body = resp.json()
-        except httpx.HTTPStatusError as e:
-            return self._fail(
-                text,
-                reason=f"HTTP {e.response.status_code}: {e.response.text[:200]}",
-            )
-        except Exception as e:  # noqa: BLE001
-            return self._fail(text, reason=repr(e))
+        body, err = await self._post_json(url, payload, headers=headers)
+        if err is not None:
+            return self._fail(text, reason=err)
 
+        assert body is not None
         try:
             doc = body["results"]["documents"][0]
         except (KeyError, IndexError):
@@ -225,7 +154,7 @@ class AzurePiiDetectionGuard(Guard):
         meta: dict[str, Any] = {
             "category_results": category_results,
             "min_confidence": self.min_confidence,
-            "check": "language:PiiEntityRecognition",
+            "check": self.CHECK_NAME,
         }
 
         if not kept:
@@ -266,25 +195,10 @@ class AzurePiiDetectionGuard(Guard):
 
     def _fail(self, text: str, *, reason: str) -> GuardCheckResult:
         skipped = [
-            {"category": c, "severity": None, "passed": None,
-             "skipped": True, "reason": reason}
-            for c in (self.categories or ["PII"])
+            self._skipped_pill(c, reason) for c in (self.categories or ["PII"])
         ]
-        meta = {
-            "error": reason,
-            "fail_open": self.fail_open,
-            "category_results": skipped,
-            "check": "unavailable",
-        }
-        if self.fail_open:
-            log.warning("azure-pii-detection fail-open: %s", reason)
-            return self._allow(text, metadata=meta)
-        log.warning("azure-pii-detection fail-closed: %s", reason)
-        return self._block(
-            text,
-            reasons=[f"pii-detection unavailable: {reason}"],
-            categories=["azure.unavailable"],
-            metadata=meta,
+        return self._fail_result(
+            text, reason=reason, skipped_categories=skipped,
         )
 
 

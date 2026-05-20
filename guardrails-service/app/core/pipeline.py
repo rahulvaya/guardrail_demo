@@ -18,6 +18,13 @@ log = logging.getLogger("agent.guardrails")
 # sanitized_text mid-stage).
 _PARALLEL = os.getenv("GUARDRAILS_SEQUENTIAL", "0") not in ("1", "true", "True", "yes")
 
+# When a guard in a parallel stage returns BLOCK, cancel the other in-flight
+# guards in that stage instead of waiting for them to finish. The trace still
+# records every guard, but cancelled ones are reported with a synthetic
+# "cancelled" reason. Default ON; disable with GUARDRAILS_CANCEL_ON_BLOCK=0
+# to get the legacy "wait for all peers" behaviour.
+_CANCEL_ON_BLOCK = os.getenv("GUARDRAILS_CANCEL_ON_BLOCK", "1") not in ("0", "false", "False", "no")
+
 
 @dataclass
 class PipelineResult:
@@ -159,11 +166,62 @@ class GuardrailPipeline:
                         reasons=[f"guard-error: {e!r}"],
                     )
 
-            results = await asyncio.gather(*[_safe(g) for g in guards])
+            # Schedule one task per guard, keyed by declaration index so we
+            # can preserve trace order at the end regardless of which task
+            # completes first.
+            tasks: list[asyncio.Task[GuardCheckResult]] = [
+                asyncio.create_task(_safe(g)) for g in guards
+            ]
+            results: list[GuardCheckResult | None] = [None] * len(guards)
+            task_to_idx = {t: i for i, t in enumerate(tasks)}
+
+            if _CANCEL_ON_BLOCK:
+                # Wait for results as they complete. On the first BLOCK,
+                # cancel the rest and synthesize "cancelled" results for them
+                # so the trace still lists every guard in the stage.
+                first_block_seen = False
+                for fut in asyncio.as_completed(tasks):
+                    try:
+                        result = await fut
+                    except asyncio.CancelledError:
+                        # Happens when we already started cancelling peers.
+                        continue
+                    # Identify which task this future belonged to.
+                    done_task = next(
+                        (t for t in tasks if t.done() and results[task_to_idx[t]] is None),
+                        None,
+                    )
+                    if done_task is None:
+                        continue
+                    results[task_to_idx[done_task]] = result
+                    if result.decision == GuardDecision.BLOCK and not first_block_seen:
+                        first_block_seen = True
+                        # Cancel everything still pending.
+                        for t in tasks:
+                            if not t.done():
+                                t.cancel()
+                        # Await cancellations so we don't leak tasks; their
+                        # synthetic "cancelled" results are filled in below.
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        break
+                # Fill in synthetic results for any guard whose task got
+                # cancelled (or never completed for some other reason).
+                for i, g in enumerate(guards):
+                    if results[i] is None:
+                        results[i] = GuardCheckResult(
+                            guard_name=g.name,
+                            decision=GuardDecision.ALLOW,
+                            sanitized_text=text,
+                            reasons=["cancelled: peer guard blocked first"],
+                            metadata={"cancelled": True},
+                        )
+                resolved: list[GuardCheckResult] = [r for r in results if r is not None]
+            else:
+                resolved = await asyncio.gather(*tasks)
 
             # Walk results in declaration order so traces and the
             # "first block wins" semantic are preserved.
-            for guard, result in zip(guards, results):
+            for guard, result in zip(guards, resolved):
                 checks.append(result)
                 if result.decision == GuardDecision.BLOCK:
                     if not blocked:

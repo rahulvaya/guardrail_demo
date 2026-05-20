@@ -19,6 +19,7 @@ import logging
 import os
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -64,10 +65,15 @@ async def lifespan(app: FastAPI):
     app.state.policies = policies
     app.state.pipelines = pipelines
     # Cache for per-request override pipelines, keyed by
-    # (policy_id, canonical-JSON of overrides). Bounded by guard-config
-    # cardinality (overridable_keys is small) so unbounded growth is not
-    # a realistic DoS vector for internal callers.
-    app.state.override_pipelines = {}
+    # (policy_id, canonical-JSON of overrides). Bounded LRU so a noisy
+    # caller that sends a fresh override per request can't grow this
+    # without limit (each pipeline holds open httpx clients via its
+    # guards' aclose()). Evicted entries are closed below in the
+    # request handler.
+    app.state.override_pipelines: "OrderedDict[Any, Any]" = OrderedDict()
+    app.state.override_pipelines_max = int(
+        os.getenv("GUARDRAILS_OVERRIDE_CACHE_MAX", "64")
+    )
 
     # Prewarm one TCP+TLS (+HTTP/2) connection to the Azure Cognitive
     # Services endpoint so the first user prompt doesn't pay handshake
@@ -198,11 +204,23 @@ async def check(req: CheckRequest) -> CheckResponse:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, {"errors": errors})
 
         cache_key = (pid, json.dumps(req.overrides, sort_keys=True, default=str))
-        pipeline = app.state.override_pipelines.get(cache_key)
+        cache: "OrderedDict[Any, Any]" = app.state.override_pipelines
+        pipeline = cache.get(cache_key)
         if pipeline is None:
             pipeline = build_pipeline_with_overrides(policy, req.overrides)
-            app.state.override_pipelines[cache_key] = pipeline
+            cache[cache_key] = pipeline
+            # Evict LRU entries past the bound and close their guards so
+            # we don't leak httpx clients / AAD tokens.
+            while len(cache) > app.state.override_pipelines_max:
+                _, evicted = cache.popitem(last=False)
+                try:
+                    await evicted.aclose()
+                except Exception:  # noqa: BLE001
+                    log.debug("error closing evicted override pipeline", exc_info=True)
             log.info("built override pipeline for policy=%s overrides=%s", pid, req.overrides)
+        else:
+            # Cache hit: refresh recency.
+            cache.move_to_end(cache_key)
     else:
         pipeline = app.state.pipelines.get(pid)
         if pipeline is None:

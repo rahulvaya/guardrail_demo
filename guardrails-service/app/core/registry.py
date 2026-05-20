@@ -124,29 +124,32 @@ def build_pipeline_from_settings(settings: Settings) -> GuardrailPipeline:
 
     master = settings.guardrails_enabled
 
-    input_guards: list[Guard] = []
-    for name, default_on in DEFAULT_INPUT_ORDER:
-        if not _is_enabled(name, default=default_on, master=master):
-            log.info("guardrail %s [input] disabled", name)
-            continue
-        guard = build_guard(name, _config_for(name))
-        if guard.stage not in (GuardStage.INPUT, GuardStage.BOTH):
-            log.warning("guard %s declared stage=%s but is in INPUT order; running anyway",
-                        name, guard.stage)
-        input_guards.append(guard)
-        log.info("guardrail %s [input] enabled config=%s", name, guard.config)
+    def _build_stage(
+        order: list[tuple[str, bool]],
+        stage_label: str,
+        allowed_stages: tuple[GuardStage, ...],
+    ) -> list[Guard]:
+        guards_out: list[Guard] = []
+        for name, default_on in order:
+            if not _is_enabled(name, default=default_on, master=master):
+                log.info("guardrail %s [%s] disabled", name, stage_label)
+                continue
+            guard = build_guard(name, _config_for(name))
+            if guard.stage not in allowed_stages:
+                log.warning(
+                    "guard %s declared stage=%s but is in %s order; running anyway",
+                    name, guard.stage, stage_label.upper(),
+                )
+            guards_out.append(guard)
+            log.info("guardrail %s [%s] enabled config=%s", name, stage_label, guard.config)
+        return guards_out
 
-    output_guards: list[Guard] = []
-    for name, default_on in DEFAULT_OUTPUT_ORDER:
-        if not _is_enabled(name, default=default_on, master=master):
-            log.info("guardrail %s [output] disabled", name)
-            continue
-        guard = build_guard(name, _config_for(name))
-        if guard.stage not in (GuardStage.OUTPUT, GuardStage.BOTH):
-            log.warning("guard %s declared stage=%s but is in OUTPUT order; running anyway",
-                        name, guard.stage)
-        output_guards.append(guard)
-        log.info("guardrail %s [output] enabled config=%s", name, guard.config)
+    input_guards = _build_stage(
+        DEFAULT_INPUT_ORDER, "input", (GuardStage.INPUT, GuardStage.BOTH)
+    )
+    output_guards = _build_stage(
+        DEFAULT_OUTPUT_ORDER, "output", (GuardStage.OUTPUT, GuardStage.BOTH)
+    )
 
     if not master:
         log.warning("GUARDRAILS_ENABLED=false - all guards disabled (Phase 1 behavior)")

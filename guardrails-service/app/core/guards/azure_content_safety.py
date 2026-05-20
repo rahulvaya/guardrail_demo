@@ -48,16 +48,14 @@ Configuration (env: ``GUARD_AZURE_CONTENT_SAFETY_CONFIG`` JSON):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-import os
 from typing import Any
 
-import httpx
-
-from ..base import Guard, GuardCheckResult, GuardStage
+from ..base import GuardCheckResult, GuardStage
 from ..registry import register_guard
+from ._azure_base import AzureGuardBase
 from .azure_endpoints import (
-    COGNITIVE_SERVICES_AAD_SCOPE,
     CONTENT_SAFETY_API_VERSION,
     content_safety_protected_material_url,
     content_safety_shield_prompt_url,
@@ -67,12 +65,10 @@ from .azure_endpoints import (
 log = logging.getLogger("agent.guardrails.azure_content_safety")
 
 DEFAULT_CATEGORIES = ["Hate", "SelfHarm", "Sexual", "Violence"]
-DEFAULT_API_VERSION = CONTENT_SAFETY_API_VERSION
 DEFAULT_SEVERITY_THRESHOLD = 4   # 0=safe, 2=low, 4=medium, 6=high
-_AAD_SCOPE = COGNITIVE_SERVICES_AAD_SCOPE
 
 
-class AzureContentSafetyGuard(Guard):
+class AzureContentSafetyGuard(AzureGuardBase):
     name = "azure-content-safety"
     stage = GuardStage.BOTH
     description = (
@@ -80,14 +76,11 @@ class AzureContentSafetyGuard(Guard):
         "plus Prompt Shields jailbreak/prompt-injection detection on input."
     )
 
+    DEFAULT_API_VERSION = CONTENT_SAFETY_API_VERSION
+    CHECK_NAME = "text:analyze"
+
     def __init__(self, **config: Any) -> None:
         super().__init__(**config)
-        self.endpoint: str = (
-            config.get("endpoint")
-            or os.getenv("AZURE_CONTENT_SAFETY_ENDPOINT", "")
-        ).rstrip("/")
-        self.api_key: str = config.get("api_key") or os.getenv("AZURE_CONTENT_SAFETY_KEY", "")
-        self.api_version: str = config.get("api_version", DEFAULT_API_VERSION)
         self.categories: list[str] = list(config.get("categories", DEFAULT_CATEGORIES))
         self.severity_threshold: int = int(
             config.get("severity_threshold", DEFAULT_SEVERITY_THRESHOLD)
@@ -100,76 +93,15 @@ class AzureContentSafetyGuard(Guard):
         self.halt_on_blocklist_hit: bool = bool(
             config.get("halt_on_blocklist_hit", True)
         )
-        self.timeout_seconds: float = float(config.get("timeout_seconds", 5.0))
-        self.fail_open: bool = bool(config.get("fail_open", True))
-
-        self._aad_token_env = "AZURE_CONTENT_SAFETY_AAD_TOKEN"
-        self._aad_credential: Any = None
-        self._client: httpx.AsyncClient | None = None
-
-        if not self.endpoint:
-            log.warning(
-                "azure-content-safety: no endpoint configured "
-                "(set AZURE_CONTENT_SAFETY_ENDPOINT); guard will fail-%s",
-                "open" if self.fail_open else "closed",
-            )
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    def _get_client(self) -> httpx.AsyncClient:
-        # Shared process-wide client (HTTP/2 + kept-alive pool); see
-        # core/azure_http.py for rationale.
-        from ..azure_http import get_client
-        return get_client(timeout=self.timeout_seconds)
-
-    async def aclose(self) -> None:
-        # No-op: shared client is owned by core.azure_http and closed in
-        # the FastAPI lifespan shutdown hook.
-        return None
-
-    # ------------------------------------------------------------------
-    # Auth
-    # ------------------------------------------------------------------
-
-    def _auth_headers_sync(self) -> dict[str, str] | None:
-        """Fast path: key or env-supplied token. Returns None when AAD is needed."""
-        if self.api_key:
-            return {"Ocp-Apim-Subscription-Key": self.api_key}
-
-        token = os.getenv(self._aad_token_env)
-        if token:
-            return {"Authorization": f"Bearer {token}"}
-        return None
-
-    async def _auth_headers(self) -> dict[str, str]:
-        fast = self._auth_headers_sync()
-        if fast is not None:
-            return fast
-        try:
-            from ..aad_cache import get_bearer_token  # local import keeps cold-start light
-            token = await get_bearer_token(_AAD_SCOPE)
-            if token:
-                return {"Authorization": f"Bearer {token}"}
-        except Exception as e:  # noqa: BLE001
-            log.warning("azure-content-safety: AAD auth unavailable: %r", e)
-        return {}
 
     # ------------------------------------------------------------------
     # Check
     # ------------------------------------------------------------------
 
     async def check(self, text: str, *, context: dict[str, Any] | None = None) -> GuardCheckResult:
-        if not text or not text.strip():
-            return self._allow(text)
-
-        if not self.endpoint:
-            return self._fail(text, reason="no endpoint configured")
-
-        headers = {"Content-Type": "application/json", **(await self._auth_headers())}
-        if "Ocp-Apim-Subscription-Key" not in headers and "Authorization" not in headers:
-            return self._fail(text, reason="no credentials available")
+        short_circuit, headers = await self._prepare_request(text)
+        if short_circuit is not None:
+            return short_circuit
 
         stage = str((context or {}).get("stage", "input")).lower()
         # Input-family stages (api_input, input/llm_input, tool_input) get
@@ -182,11 +114,7 @@ class AzureContentSafetyGuard(Guard):
         # are independent Azure API calls. Whichever first decision says BLOCK
         # wins; otherwise we return the text:analyze result. Cuts wall-clock
         # latency of this guard from ~2 round-trips to ~1.
-        import asyncio  # local import keeps module import surface minimal
-
-        analyze_task = asyncio.create_task(
-            self._run_text_analyze(text, headers, None)
-        )
+        analyze_task = asyncio.create_task(self._run_text_analyze(text, headers, None))
 
         pre_task: asyncio.Task | None = None
         if input_family and self.enable_prompt_shield:
@@ -218,20 +146,12 @@ class AzureContentSafetyGuard(Guard):
     ) -> tuple[GuardCheckResult | None, dict[str, Any] | None]:
         url = content_safety_shield_prompt_url(self.endpoint, self.api_version)
         payload = {"userPrompt": text, "documents": []}
-        try:
-            resp = await self._get_client().post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            body = resp.json()
-        except httpx.HTTPStatusError as e:
-            log.warning(
-                "azure-content-safety prompt-shield HTTP %s: %s",
-                e.response.status_code, e.response.text[:200],
-            )
-            return None, {"available": False, "error": f"HTTP {e.response.status_code}"}
-        except Exception as e:  # noqa: BLE001
-            log.warning("azure-content-safety prompt-shield error: %r", e)
-            return None, {"available": False, "error": repr(e)}
+        body, err = await self._post_json(url, payload, headers=headers)
+        if err is not None:
+            log.warning("azure-content-safety prompt-shield error: %s", err)
+            return None, {"available": False, "error": err}
 
+        assert body is not None
         user_analysis = body.get("userPromptAnalysis") or {}
         attack = bool(user_analysis.get("attackDetected", False))
         meta = {
@@ -269,7 +189,7 @@ class AzureContentSafetyGuard(Guard):
         prompt_shield_meta: dict[str, Any] | None = None,
     ) -> GuardCheckResult:
         url = content_safety_text_analyze_url(self.endpoint, self.api_version)
-        payload = {
+        payload: dict[str, Any] = {
             "text": text,
             "categories": self.categories,
             "outputType": "FourSeverityLevels",
@@ -277,18 +197,12 @@ class AzureContentSafetyGuard(Guard):
         if self.blocklist_names:
             payload["blocklistNames"] = self.blocklist_names
             payload["haltOnBlocklistHit"] = self.halt_on_blocklist_hit
-        try:
-            resp = await self._get_client().post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            body = resp.json()
-        except httpx.HTTPStatusError as e:
-            return self._fail(
-                text,
-                reason=f"HTTP {e.response.status_code}: {e.response.text[:200]}",
-            )
-        except Exception as e:  # noqa: BLE001
-            return self._fail(text, reason=f"request error: {e!r}")
 
+        body, err = await self._post_json(url, payload, headers=headers)
+        if err is not None:
+            return self._fail(text, reason=err)
+
+        assert body is not None
         analyses = body.get("categoriesAnalysis") or []
         worst: dict[str, int] = {}
         triggered: list[tuple[str, int]] = []
@@ -330,7 +244,7 @@ class AzureContentSafetyGuard(Guard):
             "severities": worst,
             "threshold": self.severity_threshold,
             "category_results": category_results,
-            "check": "text:analyze",
+            "check": self.CHECK_NAME,
         }
         if prompt_shield_meta is not None:
             common_meta["prompt_shield"] = prompt_shield_meta
@@ -385,20 +299,12 @@ class AzureContentSafetyGuard(Guard):
     ) -> GuardCheckResult | None:
         url = content_safety_protected_material_url(self.endpoint, self.api_version)
         payload = {"text": text}
-        try:
-            resp = await self._get_client().post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            body = resp.json()
-        except httpx.HTTPStatusError as e:
-            log.warning(
-                "azure-content-safety protected-material HTTP %s: %s",
-                e.response.status_code, e.response.text[:200],
-            )
+        body, err = await self._post_json(url, payload, headers=headers)
+        if err is not None:
+            log.warning("azure-content-safety protected-material error: %s", err)
             return None  # fail-soft for this sub-check; main analyze still runs
-        except Exception as e:  # noqa: BLE001
-            log.warning("azure-content-safety protected-material error: %r", e)
-            return None
 
+        assert body is not None
         analysis = body.get("protectedMaterialAnalysis") or {}
         detected = bool(analysis.get("detected", False))
         if not detected:
@@ -423,33 +329,16 @@ class AzureContentSafetyGuard(Guard):
     def _fail(self, text: str, *, reason: str) -> GuardCheckResult:
         # Surface the full list of checks the guard *would* have run so the
         # UI can render them as "skipped / not configured" pills.
-        skipped_categories: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
         if self.enable_prompt_shield:
-            skipped_categories.append(
-                {"category": "PromptShield", "severity": None, "passed": None,
-                 "skipped": True, "reason": reason}
-            )
+            skipped.append(self._skipped_pill("PromptShield", reason))
         for cat in self.categories:
-            skipped_categories.append(
-                {"category": cat, "severity": None, "passed": None,
-                 "skipped": True, "reason": reason}
-            )
-        meta: dict[str, Any] = {
-            "error": reason,
-            "fail_open": self.fail_open,
-            "category_results": skipped_categories,
-            "threshold": self.severity_threshold,
-            "check": "unavailable",
-        }
-        if self.fail_open:
-            log.warning("azure-content-safety fail-open: %s", reason)
-            return self._allow(text, metadata=meta)
-        log.warning("azure-content-safety fail-closed: %s", reason)
-        return self._block(
+            skipped.append(self._skipped_pill(cat, reason))
+        return self._fail_result(
             text,
-            reasons=[f"content-safety unavailable: {reason}"],
-            categories=["azure.unavailable"],
-            metadata=meta,
+            reason=reason,
+            skipped_categories=skipped,
+            extra_meta={"threshold": self.severity_threshold},
         )
 
 
