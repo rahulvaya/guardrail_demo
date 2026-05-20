@@ -20,18 +20,40 @@ from ..registry import register_guard
 
 log = logging.getLogger("agent.guardrails.pii_detect")
 
-# Conservative regex set. Each entry: (label, regex, mask_template).
-PII_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
-    ("email",       re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"),                       "<EMAIL>"),
-    ("ssn",         re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),                              "<SSN>"),
-    ("credit-card", re.compile(r"\b(?:\d[ -]?){13,19}\b"),                             "<CARD>"),
+# Conservative regex set. Each entry: label -> {regex, mask}.
+# Configurable via policy YAML: override the whole set with ``patterns``
+# or merge extras with ``extra_patterns``. Each value is either a regex
+# string (mask defaults to ``<LABEL>``) or a {regex, mask} mapping.
+DEFAULT_PATTERNS: dict[str, dict[str, str]] = {
+    "email":       {"regex": r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b", "mask": "<EMAIL>"},
+    "ssn":         {"regex": r"\b\d{3}-\d{2}-\d{4}\b", "mask": "<SSN>"},
+    "credit-card": {"regex": r"\b(?:\d[ -]?){13,19}\b", "mask": "<CARD>"},
     # US phone: matches both formatted ((123) 456-7890, +1-234-567-8900) and
     # bare 10-digit (1234567890) variants. The bare form requires word
     # boundaries so it doesn't gobble unrelated long digit runs.
-    ("us-phone",    re.compile(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"), "<PHONE>"),
-    ("ipv4",        re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),                        "<IP>"),
-    ("iban",        re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b"),                   "<IBAN>"),
-]
+    "us-phone":    {"regex": r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b", "mask": "<PHONE>"},
+    "ipv4":        {"regex": r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "mask": "<IP>"},
+    "iban":        {"regex": r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b", "mask": "<IBAN>"},
+}
+
+
+def _compile_patterns(spec: dict[str, Any]) -> list[tuple[str, re.Pattern[str], str]]:
+    out: list[tuple[str, re.Pattern[str], str]] = []
+    for label, entry in (spec or {}).items():
+        try:
+            if isinstance(entry, str):
+                expr, mask = entry, f"<{str(label).upper()}>"
+            elif isinstance(entry, dict):
+                expr = entry.get("regex") or entry.get("pattern")
+                mask = str(entry.get("mask", f"<{str(label).upper()}>"))
+            else:
+                continue
+            if not expr:
+                continue
+            out.append((str(label), re.compile(expr), mask))
+        except re.error as exc:
+            log.warning("pii-detect: bad regex %r for %r: %s", expr, label, exc)
+    return out
 
 
 class PiiDetectGuard(Guard):
@@ -43,6 +65,11 @@ class PiiDetectGuard(Guard):
         super().__init__(**config)
         self.mode: str = str(config.get("mode", "sanitize")).lower()  # sanitize | block
         self.engine: str = str(config.get("engine", "regex")).lower()  # regex | presidio
+        raw: dict[str, Any] = dict(config.get("patterns") or DEFAULT_PATTERNS)
+        extra = config.get("extra_patterns") or {}
+        if isinstance(extra, dict):
+            raw.update(extra)
+        self._patterns: list[tuple[str, re.Pattern[str], str]] = _compile_patterns(raw)
         self._presidio = None
         if self.engine == "presidio":
             try:
@@ -60,7 +87,7 @@ class PiiDetectGuard(Guard):
     def _check_regex(self, text: str) -> GuardCheckResult:
         found: list[str] = []
         sanitized = text
-        for label, pat, mask in PII_PATTERNS:
+        for label, pat, mask in self._patterns:
             new, n = pat.subn(mask, sanitized)
             if n > 0:
                 found.append(f"{label} x{n}")

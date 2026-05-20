@@ -62,6 +62,11 @@ class AzureTaskAdherenceGuard(Guard):
         self.require_task_definition: bool = bool(
             config.get("require_task_definition", False)
         )
+        # Optional static task definition supplied via policy config. Used
+        # as a fallback when the per-call context does not carry one, so
+        # policy authors can pin a fixed agent scope (e.g. "banking
+        # assistant") without changing the calling code.
+        self.task_definition: str = str(config.get("task_definition", "")).strip()
         self.timeout_seconds: float = float(config.get("timeout_seconds", 8.0))
         self.fail_open: bool = bool(config.get("fail_open", True))
 
@@ -105,7 +110,10 @@ class AzureTaskAdherenceGuard(Guard):
             return self._fail(text, "no endpoint configured")
 
         task_def = str(
-            ctx.get("task_definition") or ctx.get("system_prompt") or ""
+            ctx.get("task_definition")
+            or ctx.get("system_prompt")
+            or self.task_definition
+            or ""
         ).strip()
         if not task_def:
             if self.require_task_definition:

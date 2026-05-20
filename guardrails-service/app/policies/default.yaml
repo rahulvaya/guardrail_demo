@@ -36,7 +36,9 @@ description: Default domain-neutral policy. Safety + privacy + secret leak.
 #                                prompt-injection       (heuristic jailbreak)
 #                                azure-content-safety   (Prompt Shields on
 #                                   input via enable_prompt_shield: true)
-#   G-03  Intent Recognition     topic-relevance        (scope classifier;
+#   G-03  Intent Recognition     azure-topic-relevance  (Azure CS Custom
+#                                   Categories; managed scope filter)
+#                                topic-relevance        (local scope classifier;
 #                                   supply `keywords:` to activate)
 #   G-03a Task Adherence         azure-task-adherence   (Azure CS preview)
 #                                task-adherence         (local heuristic)
@@ -98,7 +100,17 @@ api_input:
       max_chars: 8000
   - prompt-injection:        # G-02 Input Validation (heuristic backup)
       enabled: true
-  - topic-relevance:         # G-03 Intent Recognition / scope classifier
+  - azure-topic-relevance:   # G-03 Azure managed scope classifier
+      # Managed counterpart to local `topic-relevance` below. Runs FIRST
+      # so an Azure decision wins when available. Falls open on error /
+      # 404 / unconfigured -> local `topic-relevance` provides backup.
+      # Requires a Custom Category trained in your Content Safety
+      # resource. Docs: https://learn.microsoft.com/azure/ai-services/content-safety/concepts/custom-categories
+      enabled: false
+      categories: []         # e.g. ["off_topic"]
+      severity_threshold: 2
+      fail_open: true
+  - topic-relevance:         # G-03 Intent Recognition / local scope classifier
       enabled: false
       min_ratio: 0.05
       min_length: 20
@@ -219,19 +231,42 @@ input:
       phrases: ${BANNED_PHRASES_JSON:[]}
       
   # Heuristic jailbreak / role-override detector (no GPU required).
+  # Built-in PATTERNS catalog ships with ~10 patterns covering
+  # role-override, system-prompt leakage, tool override, encoding tricks.
+  # Override or extend per environment:
+  #   patterns:             # REPLACES defaults; list of [regex, weight]
+  #     - ["\\bdo anything now\\b", 0.95]
+  #   extra_patterns:       # MERGED on top of active set
+  #     - {pattern: "\\bprintenv\\b", weight: 0.6}
   - prompt-injection:
       enabled: true
+      # block_threshold: 0.7
 
   # Local regex PII detector (no cloud call).
+  # Default labels: email, ssn, credit-card, us-phone, ipv4, iban.
+  # Replace or extend per environment:
+  #   patterns:             # REPLACES the default catalog
+  #     email: {regex: "\\b[\\w.+-]+@[\\w-]+\\.[\\w.-]+\\b", mask: "<EMAIL>"}
+  #   extra_patterns:       # MERGED on top of active set
+  #     nhs-number: "\\b\\d{3} \\d{3} \\d{4}\\b"
   - pii-detect:
       enabled: true
       mode: block
 
   # Output-only PII redactor. Listed for completeness; keep disabled on input.
+  # Built-in masks: @card (preserves last 4), @iban (preserves first 4).
+  # Custom example:
+  #   extra_patterns:
+  #     uk-sortcode: {regex: "\\b\\d{2}-\\d{2}-\\d{2}\\b", mask: "**-**-**"}
   - output-pii-redact:
       enabled: false
 
   # Refuse leaked secrets / API keys / connection strings in user input.
+  # Default labels: aws-access-key, aws-secret, github-pat, openai-key,
+  # private-key, jwt, bearer. Add your own:
+  #   extra_patterns:
+  #     acme-token: "\\bacme_[A-Za-z0-9]{32}\\b"
+  #     stripe-key: "\\bsk_live_[A-Za-z0-9]{24,}\\b"
   - secret-leak:
       enabled: true
 
@@ -264,6 +299,14 @@ input:
   # Azure managed Task Adherence — OUTPUT-only check. Disabled on input.
   - azure-task-adherence:
       enabled: false
+
+  # Azure managed scope classifier. Runs first; local `topic-relevance`
+  # below acts as fallback when Azure is unavailable / unconfigured.
+  - azure-topic-relevance:
+      enabled: false
+      categories: []
+      severity_threshold: 2
+      fail_open: true
 
   # Topic relevance / scope. Opt in by supplying `keywords`.
   - topic-relevance:
@@ -358,6 +401,13 @@ output:
       enabled: false
       require_task_definition: false
 
+  # Azure managed scope classifier on output (rare).
+  - azure-topic-relevance:
+      enabled: false
+      categories: []
+      severity_threshold: 2
+      fail_open: true
+
   # Topic relevance on output (rare — most teams check input only).
   - topic-relevance:
       enabled: false
@@ -437,6 +487,12 @@ tool_output:
   # Azure managed Task Adherence — typically output-only. Off here.
   - azure-task-adherence:
       enabled: false
+
+  - azure-topic-relevance:
+      enabled: false
+      categories: []
+      severity_threshold: 2
+      fail_open: true
 
   - topic-relevance:
       enabled: false

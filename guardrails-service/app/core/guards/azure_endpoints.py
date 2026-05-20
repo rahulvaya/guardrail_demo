@@ -46,6 +46,7 @@ CONTENT_SAFETY_TEXT_ANALYZE_PATH = "/contentsafety/text:analyze"
 CONTENT_SAFETY_PROTECTED_MATERIAL_PATH = "/contentsafety/text:detectProtectedMaterial"
 CONTENT_SAFETY_GROUNDEDNESS_PATH = "/contentsafety/text:detectGroundedness"
 CONTENT_SAFETY_TASK_ADHERENCE_PATH = "/contentsafety/text:detectTaskAdherence"
+CONTENT_SAFETY_CUSTOM_CATEGORY_PATH = "/contentsafety/text:analyzeCustomCategory"
 LANGUAGE_ANALYZE_TEXT_PATH = "/language/:analyze-text"
 
 
@@ -113,6 +114,26 @@ def content_safety_task_adherence_url(
     """
     return (
         f"{_normalize(endpoint)}{CONTENT_SAFETY_TASK_ADHERENCE_PATH}"
+        f"?api-version={api_version}"
+    )
+
+
+def content_safety_custom_category_url(
+    endpoint: str,
+    api_version: str = CONTENT_SAFETY_API_VERSION,
+    path: str = CONTENT_SAFETY_CUSTOM_CATEGORY_PATH,
+) -> str:
+    """Azure Custom Categories Standard inference (INPUT scope filter).
+
+    Single-category-per-call: callers fan out over their configured
+    category list. The ``path`` arg lets policy authors point at the
+    future Rapid preview path (or any other inline-definition variant)
+    without code changes.
+
+    Docs: https://learn.microsoft.com/azure/ai-services/content-safety/concepts/custom-categories
+    """
+    return (
+        f"{_normalize(endpoint)}{path}"
         f"?api-version={api_version}"
     )
 

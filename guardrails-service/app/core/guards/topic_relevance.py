@@ -71,6 +71,7 @@ from typing import Any
 
 from ..base import Guard, GuardCheckResult, GuardStage
 from ..registry import register_guard
+from .task_adherence import _keywords_from_task_definition
 
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'-]+")
 
@@ -82,7 +83,19 @@ class TopicRelevanceGuard(Guard):
 
     def __init__(self, **config: Any) -> None:
         super().__init__(**config)
-        self.keywords: set[str] = {w.lower() for w in config.get("keywords", []) or []}
+        explicit = config.get("keywords")
+        # DRY with `task-adherence`: when no explicit `keywords:` list
+        # is given but a free-text `task_definition:` is, derive the
+        # in-scope vocabulary from it (same anchor both guards share).
+        self.task_definition: str = str(config.get("task_definition", "")).strip()
+        if explicit:
+            self.keywords: set[str] = {w.lower() for w in explicit}
+        elif self.task_definition:
+            self.keywords = {
+                w.lower() for w in _keywords_from_task_definition(self.task_definition)
+            }
+        else:
+            self.keywords = set()
         self.min_ratio: float = float(config.get("min_ratio", 0.05))
         self.min_length: int = int(config.get("min_length", 3))
         self.refusal_message: str = str(
@@ -123,9 +136,6 @@ class TopicRelevanceGuard(Guard):
         return self._allow(text, score=ratio)
 
 
-# Canonical name.
+# Canonical name. (The legacy "banking-relevance" alias was removed
+# once all in-tree policies migrated to "topic-relevance".)
 register_guard("topic-relevance", lambda cfg: TopicRelevanceGuard(**cfg))
-# Backward-compatible alias for legacy policies that still reference
-# the previous "banking-relevance" name. New consumers should use
-# "topic-relevance".
-register_guard("banking-relevance", lambda cfg: TopicRelevanceGuard(**cfg))

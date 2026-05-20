@@ -4,6 +4,7 @@ from . import (
     azure_groundedness,       # noqa: F401  (Azure managed groundedness)
     azure_pii_detection,      # noqa: F401  (Azure AI Language PII)
     azure_task_adherence,     # noqa: F401  (Azure managed task adherence)
+    azure_topic_relevance,    # noqa: F401  (Azure managed topic / scope filter)
     banned_substrings,        # noqa: F401
     bias_detect,              # noqa: F401  (stereotype / demographic skew)
     competitor_mentions,      # noqa: F401

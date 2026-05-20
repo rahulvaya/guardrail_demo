@@ -120,19 +120,19 @@ async def test_competitor_mentions_sanitizes():
 
 
 # ---------------------------------------------------------------------------
-# Custom guard - banking-relevance
+# Scope guard - topic-relevance (used by BankBuddy for banking-topic scoping)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_banking_relevance_allows_banking_query():
-    g = build_guard("banking-relevance", {})
+    g = build_guard("topic-relevance", {})
     r = await g.check("Can you transfer $100 from my checking account to savings?")
     assert r.decision == GuardDecision.ALLOW
 
 
 @pytest.mark.asyncio
 async def test_banking_relevance_blocks_off_topic():
-    g = build_guard("banking-relevance", {"min_length": 10})
+    g = build_guard("topic-relevance", {"min_length": 10})
     r = await g.check("Write me a long poem about cats playing in a meadow")
     assert r.decision == GuardDecision.BLOCK
     assert "policy.off-topic" in r.categories
@@ -140,7 +140,7 @@ async def test_banking_relevance_blocks_off_topic():
 
 @pytest.mark.asyncio
 async def test_banking_relevance_skips_short_input():
-    g = build_guard("banking-relevance", {"min_length": 25})
+    g = build_guard("topic-relevance", {"min_length": 25})
     r = await g.check("hi")
     assert r.decision == GuardDecision.ALLOW
 
@@ -188,7 +188,7 @@ async def test_pipeline_master_disable(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_pipeline_per_guard_disable(monkeypatch):
-    monkeypatch.setenv("GUARD_BANKING_RELEVANCE_ENABLED", "false")
+    monkeypatch.setenv("GUARD_TOPIC_RELEVANCE_ENABLED", "false")
     monkeypatch.setenv("GUARD_PROMPT_INJECTION_ENABLED", "false")
     monkeypatch.setenv("GUARD_PII_DETECT_ENABLED", "false")
     monkeypatch.setenv("GUARD_BANNED_SUBSTRINGS_ENABLED", "false")
@@ -208,7 +208,7 @@ async def test_pipeline_per_guard_disable(monkeypatch):
 def test_all_default_guards_registered():
     expected = {
         "token-limit", "banned-substrings", "prompt-injection",
-        "pii-detect", "banking-relevance",
+        "pii-detect", "topic-relevance",
         "output-pii-redact", "secret-leak", "toxicity", "competitor-mentions",
         "groundedness", "task-adherence", "bias-detect",
     }

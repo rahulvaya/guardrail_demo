@@ -317,7 +317,7 @@ mechanisms selectable via `GUARDRAILS_AUTH_MODE`:
 | `GUARDRAILS_AAD_ALLOWED_APPIDS` | *unset* | CSV of caller app-ids; empty = any caller in the tenant |
 | `GUARDRAILS_AAD_ISSUER` | derived from tenant | Override for sovereign clouds / testing |
 | `GUARDRAILS_AAD_JWKS_URI` | derived via OIDC discovery | Override for sovereign clouds / testing |
-| `AZURE_CONTENT_SAFETY_ENDPOINT` / `_KEY` | *unset* | Used by `azure-content-safety`, `azure-groundedness`, and `azure-task-adherence` guards |
+| `AZURE_CONTENT_SAFETY_ENDPOINT` / `_KEY` | *unset* | Used by `azure-content-safety`, `azure-groundedness`, `azure-task-adherence`, and `azure-topic-relevance` guards |
 | `AZURE_CONTENT_SAFETY_AAD_TOKEN` | *unset* | Optional pre-fetched AAD token (scope `https://cognitiveservices.azure.com/.default`); skips DefaultAzureCredential |
 | `AZURE_LANGUAGE_ENDPOINT` / `_KEY` | *unset* | Used by the `azure-pii-detection` guard |
 | `AZURE_LANGUAGE_AAD_TOKEN` | *unset* | Optional pre-fetched AAD token for Language |
@@ -638,6 +638,62 @@ If you already have an agent and just want to add guardrails:
 
 Nothing in the agent's runtime changes besides two HTTP calls per turn.
 
+## Registering your own policy
+
+A "policy" is a YAML file whose top-level `id:` becomes the value callers
+pass as `policy_id`. The service loads every `*.yaml` it finds under
+the colon-separated paths in **`GUARDRAILS_POLICIES_DIR`** (default
+`/app/app/policies` inside the image) at startup and exposes each one
+as a routable pipeline.
+
+There are three knobs:
+
+| Knob | What it does | Set where |
+|---|---|---|
+| `GUARDRAILS_POLICIES_DIR` | Colon-separated list of folders the loader scans for `*.yaml`. The shipped image always contains `/app/app/policies` with the baseline `default` policy. Append your own folder to overlay extra policies without rebuilding. | Container env |
+| `GUARDRAILS_DEFAULT_POLICY_ID` | `policy_id` to use when a request omits one. Must match an `id:` from a loaded YAML. | Container env |
+| `policy_id` in the request body | Per-request override. One guardrails instance can serve many consumer apps — each app just sends its own id. | Caller (POST `/v1/check`) |
+
+### Minimal onboarding checklist
+
+| Step | What | Where |
+|---|---|---|
+| 1 | Copy [`app/policies/default.yaml`](app/policies/default.yaml) → `<your-app>/policies/<your-app>.yaml`, change `id:` to `<your-app>` (e.g. `retail-banking-default`), tune `enabled:` flags per stage. | your repo |
+| 2 | Mount that folder into the container and append its path to `GUARDRAILS_POLICIES_DIR`. | compose / helm |
+| 3 | Set `GUARDRAILS_DEFAULT_POLICY_ID=<your-app>` (or omit and have callers always send `policy_id`). | container env |
+| 4 | Recreate the container — policy YAML is bind-mounted, no rebuild needed. | `docker compose up -d --force-recreate guardrails` |
+| 5 | Confirm in logs: `policy loaded: <your-app>`. | `docker logs <container>` |
+
+### Reference wiring (BankBuddy)
+
+[`bankbuddy/docker-compose.yml`](../bankbuddy/docker-compose.yml) is the
+canonical example — copy and adapt:
+
+```yaml
+guardrails:
+  image: bankbuddy-guardrails:dev
+  environment:
+    GUARDRAILS_POLICIES_DIR: /app/app/policies:/policies-extra
+    GUARDRAILS_DEFAULT_POLICY_ID: bankbuddy-default
+  volumes:
+    - ./policies:/policies-extra:ro          # ./policies/bankbuddy-default.yaml -> id: bankbuddy-default
+```
+
+Per-request override from the caller:
+
+```json
+POST /v1/check
+{
+  "stage": "api_input",
+  "text": "...",
+  "policy_id": "bankbuddy-default"
+}
+```
+
+> Tip: keep one policy per consumer app. Different needs (stricter PII,
+> different scope, different blocklists) belong in **different policy
+> bundles**, not in conditional logic inside one file.
+
 ## Consumer onboarding (any team)
 
 1. Get a federated identity (AKS Workload Identity) for your service, or a
@@ -685,12 +741,40 @@ catalog. Top-level YAML keys map to the `stage` values listed in
 | `pii-detect` | G-04 | tool_input, tool_output, output, api_output | Regex PII (SSN, credit card, email, phone, IPv4, IBAN). `mode: block\|sanitize`. |
 | `output-pii-redact` | G-04 | output, api_output | Sanitize-style redactor for assistant replies. |
 | `secret-leak` | G-05 | tool_input, tool_output, output, api_output | Refuse API keys, connection strings, JWTs, private keys. |
-| `topic-relevance` | G-03 | input | Scope check via `keywords:`. Also registered as alias `banking-relevance`. |
+| `topic-relevance` | G-03 | input | Scope check via `keywords:` or `task_definition:`. Derives in-scope vocabulary from the free-text task description when no explicit keyword list is supplied. |
 | `competitor-mentions` | — | output | Block configured competitor names. |
 | `bias-detect` | G-09 | output, api_output | Lexicon-based stereotype / demographic-skew detector. |
 | `groundedness` | G-08 | output | Local overlap-based hallucination check against `context.sources`. |
 | `task-adherence` | G-03a | tool_input, output | Local heuristic that the reply / planned tool call stays on the configured task. |
 | `toxicity` | G-01 | output | Classifier-based toxicity score. |
+
+#### Local guard configuration keys
+
+Every local guard exposes its pattern lists, thresholds, and messages
+through policy YAML so the same image can be reused across teams
+without code changes. Pass the same keys under any stage; values come
+from policy YAML or the matching `GUARD_<NAME>_CONFIG` JSON env var.
+
+| Guard | Config keys | Notes |
+|---|---|---|
+| `token-limit` | `max_chars` (int, default `8000`) | Cheap proxy for token count. |
+| `banned-substrings` | `phrases` (list[str]), `extra_phrases` via `context.banned_phrases`, `case_sensitive` (bool, default `false`), `allow_overrides` (bool, default `true`) | Merged from YAML + per-request context + built-in `DEFAULT_PHRASES` fallback. |
+| `prompt-injection` | `block_threshold` (float, default `0.7`), `patterns` (list of `[regex, weight]` or `{pattern, weight}`), `extra_patterns` (same shape, merged) | `patterns` REPLACES the default catalog; `extra_patterns` only extends it. |
+| `pii-detect` | `mode` (`block` \| `sanitize`, default `sanitize`), `engine` (`regex` \| `presidio`, default `regex`), `patterns` (dict[label → regex \| `{regex, mask}`]), `extra_patterns` (same, merged) | Default labels: `email`, `ssn`, `credit-card`, `us-phone`, `ipv4`, `iban`. |
+| `output-pii-redact` | `patterns`, `extra_patterns` (dict[label → regex \| `{regex, mask}`]) | Built-in masks: `@card` (last-4), `@iban` (first-4). Otherwise any literal string mask. |
+| `secret-leak` | `patterns` (dict[label → regex]), `extra_patterns` (dict, merged) | Default labels: `aws-access-key`, `aws-secret`, `github-pat`, `openai-key`, `private-key`, `jwt`, `bearer`. |
+| `competitor-mentions` | `competitors` (list[str]) | Output sanitize-style; replaces each mention with `<a competitor>`. |
+| `topic-relevance` | `keywords` (list[str]) OR `task_definition` (str), `min_ratio` (float, default `0.05`), `min_length` (int, default `3`), `refusal_message` (str) | When no keywords given, derives vocabulary from `task_definition`. No keywords → no-op. |
+| `task-adherence` | `engine` (default `keyword`), `task_definition` (str) OR `in_scope_keywords` (list[str]), `out_of_scope_keywords` (list[str]), `strict_in_scope` (bool), `block_threshold` (float, default `0.34`), `warn_threshold` (float, default `0.6`), `min_out_of_scope_sentences` (int, default `2`), `min_length` (int, default `60`), `block_message`, `reminder_suffix` | Same `task_definition` value powers `azure-task-adherence`. |
+| `bias-detect` | `engine` (`lexicon` \| `detoxify-unbiased` \| `hap` \| `llm-judge`), `patterns` (dict[category → list[regex]]), `severity_map` (dict[category → `low`\|`medium`\|`high`]), `neutral_replacement` (str), `block_message` (str), `min_length` (int, default `30`) | `patterns` REPLACES the default lexicon; `severity_map` MERGES with defaults. |
+| `groundedness` | `engine` (`overlap` \| `nli` \| `llm-judge` \| `azure`), `block_threshold` (float, default `0.45`), `warn_threshold` (float, default `0.65`), `require_sources` (bool), `min_length` (int, default `40`), `unverified_suffix` (str), `block_message` (str) | Needs `context.sources: [str, ...]` from the caller. |
+| `toxicity` | `engine` (`keyword` \| `detoxify`), `threshold` (float, default `0.7`), `words` (list[str]) | Default `words` list is intentionally minimal; replace via config. |
+
+For the four regex-based local guards above (`prompt-injection`,
+`pii-detect`, `output-pii-redact`, `secret-leak`) the pattern catalogs
+are **fully overridable** — no Python edits required. Use `patterns:`
+to fork the catalog, or `extra_patterns:` to layer organisation-specific
+detectors on top of the shipped defaults.
 
 ### Azure-managed guards
 
@@ -704,12 +788,157 @@ credentials (endpoint + key or AAD). Azure AI Language guard uses
 | `azure-pii-detection` | G-04 | api_input, tool_input, tool_output, output, api_output | Azure AI Language PII | `mode: block\|sanitize`, `min_confidence`. |
 | `azure-groundedness` | G-08 | output | `text:detectGroundedness` | Requires `context.sources` (and `context.query` for QnA `task`). Config: `domain`, `task`, `require_sources`. |
 | `azure-task-adherence` | G-03a | tool_input, output | `text:detectTaskAdherence` | Requires `context.task_definition` (or `system_prompt`). Config: `require_task_definition`. |
+| `azure-topic-relevance` | G-03 | api_input, input | `text:analyzeCustomCategory` | Managed scope filter via Content Safety **Custom Categories**. Requires one or more categories trained in your resource (see [Training a Custom Category](#training-a-custom-category-for-azure-topic-relevance) below). Config: `categories: [name | {name, version}]`, `category_version`, `severity_threshold`, `url_path` (override for Rapid preview). Fans out one call per category and ORs detections. Pairs with the local `topic-relevance` guard as fallback. |
 
 Every Azure guard supports `fail_open: true|false` (allow vs block on
 API errors) and `timeout_seconds`. By convention the **`api_input`** and
 **`tool_input`** stages run `fail_open: false` (fail-closed at the trust
 boundary) while **`api_output`** runs `fail_open: true` (don't lose a
 clean reply to a transient provider blip).
+
+#### What `fail_open` means
+
+`fail_open` controls what the guard does when the **provider call itself
+fails** — HTTP 5xx, network timeout, auth error, quota exhausted,
+malformed response, etc. It does **not** affect normal `block` /
+`sanitize` decisions; those always come from the provider's verdict.
+
+| Setting | Behaviour on provider error | Use when |
+|---|---|---|
+| `fail_open: true`  | Guard returns **ALLOW** + records the error in metadata. The pipeline continues to the next guard. | You have other defences in depth and an outage must not take the product down (typical for `api_output`, `output`, defence-in-depth on `input`). |
+| `fail_open: false` | Guard returns **BLOCK** with `categories=["provider.error"]`. The whole pipeline short-circuits and the request is refused. | You're at a trust boundary and "we couldn't check" must mean "we don't allow it" (typical for `api_input` and `tool_input`). |
+
+Rules of thumb used by the shipped `default.yaml`:
+
+- **`api_input` / `tool_input` → `fail_open: false`.** Hostile traffic
+  hits these stages first. If Content Safety is down we'd rather refuse
+  the turn than wave a jailbreak attempt through.
+- **`input` / `output` / `tool_output` → `fail_open: true`.** Those
+  stages run after the trust-boundary check, so a transient blip here
+  should not lose a clean LLM reply or tool result.
+- **`api_output` → `fail_open: true`.** The reply has already been
+  generated; failing closed would burn LLM tokens and frustrate users
+  for a provider issue they can't fix.
+
+Pair `fail_open: true` with `timeout_seconds` to bound the latency cost
+of an outage (the guard returns ALLOW the instant the timeout fires).
+Errors are always logged at WARN level with the upstream status code so
+you can alert on `provider.error` spikes regardless of which mode is in
+use.
+
+### Training a Custom Category for `azure-topic-relevance`
+
+`azure-topic-relevance` calls Azure AI Content Safety **Custom
+Categories (Standard)**. Each category in your `categories:` config
+must be **trained and deployed in your Content Safety resource before
+the guard can fire** — otherwise every call returns
+`HTTP 400 customized categories not found or not ready to use` and the
+guard fails open. Pair it with the local `topic-relevance` guard so an
+untrained / 4xx response falls back to a deterministic scope check.
+
+The BankBuddy policy ships with `categories: [non_banking]`. Steps to
+make it real on your own Azure resource:
+
+1. **Prepare positive samples.** Create a folder of `.txt` files (one
+   example per file, or one per line in a single file) with **~50+
+   off-topic queries** — the kind of question the agent must refuse.
+   For `non_banking`:
+
+   ```text
+   what is atlanta
+   who won the world cup
+   write me a poem about the moon
+   how do I cook risotto
+   recommend a movie
+   what's the weather tomorrow
+   tell me a joke
+   explain quantum computing
+   which stock should I buy
+   draft an email to my boss
+   ...
+   ```
+
+   You don't need negative (in-scope) samples — Standard tier infers
+   them. Add a second category (`banking`) trained on positive banking
+   queries only if precision is poor.
+
+2. **Upload to blob storage.** Push the folder to any blob container
+   in the same subscription as the Content Safety resource. Grant the
+   resource's **system-assigned managed identity** the
+   `Storage Blob Data Reader` role on that container — Custom
+   Categories trains *from blob*, not from a portal upload.
+
+3. **Train in Content Safety Studio.** Open
+   <https://contentsafety.cognitive.azure.com/customCategory>, select
+   your Content Safety resource, then **Create category**:
+
+   - **Name**: `non_banking` (exact match — this is the string the
+     guard's `categories:` config sends to Azure; case-sensitive).
+   - **Definition**: short prose, e.g. *"Any question not related to
+     retail banking — accounts, cards, transfers, loans, mortgages,
+     payments, ATMs, branches, statements, fees."*
+   - **Blob URL**: paste the container URL (e.g.
+     `https://<acct>.blob.core.windows.net/non-banking-samples`).
+
+   Click **Create and train**. Training takes ~5–15 min depending on
+   sample count. When status flips to **Succeeded**, note the
+   **Version** number (usually `1` for the first deploy).
+
+4. **Smoke-test in Studio.** Use the **Try it out** pane: paste
+   `what is atlanta` → expect `detected: true`; paste
+   `show me my balance` → expect `detected: false`. Adjust samples
+   and re-train if you see false positives / negatives.
+
+5. **Flip the guard on.** In your policy YAML (e.g.
+   [`policies-extra/bankbuddy-default.yaml`](../bankbuddy/policies/bankbuddy-default.yaml)):
+
+   ```yaml
+   - azure-topic-relevance:
+       enabled: true
+       categories:
+         - {name: non_banking, version: 1}   # version from Studio
+       severity_threshold: 2
+       fail_open: true                       # keep local fallback effective
+       refusal_message: >-
+         I can only help with banking questions - accounts, cards,
+         transfers, loans, ATMs.
+   ```
+
+   Policy is bind-mounted, so no rebuild is needed:
+
+   ```powershell
+   docker compose up -d --force-recreate guardrails
+   ```
+
+6. **Verify end-to-end.** Send an off-topic query through the API and
+   confirm `azure-topic-relevance` is the guard that blocks (instead
+   of the local `topic-relevance` fallback):
+
+   ```powershell
+   docker exec bankbuddy-guardrails python -c "import asyncio, httpx, json; h={'Authorization':'Bearer <token>'}; payload={'stage':'api_input','text':'what is atlanta','policy_id':'bankbuddy-default'}; r=asyncio.run(httpx.AsyncClient(timeout=15).post('http://localhost:8001/v1/check', json=payload, headers=h)); d=r.json(); [print(g['name'],g['decision'],g.get('reasons')) for g in d['guards']]"
+   ```
+
+#### Operational notes
+
+- **Versions.** Each re-train produces a new Version. Pin it in YAML
+  (`{name: ..., version: N}`) once you're happy so a future re-train
+  doesn't silently change behaviour. The shorthand
+  `categories: [non_banking]` uses the guard's `category_version`
+  default (`1`).
+- **Fan-out cost.** Custom Categories Standard checks **one category
+  per call**; the guard fans out across the list and ORs the results.
+  Keep the list short on hot stages (`api_input`).
+- **Always `fail_open: true`.** A billing / quota / outage issue must
+  not brick the chat. The local `topic-relevance` guard listed below
+  it in the policy provides deterministic backup.
+- **Rapid preview.** If you adopt the inline-definition Rapid preview
+  in the future, override `url_path` in the policy config — the rest
+  of the request shape is compatible. The canonical path constant
+  lives in
+  [`app/core/guards/azure_endpoints.py`](app/core/guards/azure_endpoints.py)
+  (`CONTENT_SAFETY_CUSTOM_CATEGORY_PATH`).
+- **Docs.**
+  <https://learn.microsoft.com/azure/ai-services/content-safety/how-to/custom-categories>
 
 ## Policy YAML env-var expansion
 

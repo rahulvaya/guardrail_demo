@@ -20,6 +20,18 @@
 id: bankbuddy-default
 description: BankBuddy retail banking assistant - default policy
 
+# Reusable anchor: the scope/task description BankBuddy enforces via
+# azure-task-adherence. Edit here once; reference with `*banking_task`
+# anywhere in the file.
+banking_task: &banking_task >-
+  BankBuddy is a retail banking customer-service assistant. It only
+  answers questions about the user's own bank accounts, balances,
+  transactions, transfers, payments, cards, loans, mortgages, ATM
+  locations, branch hours, fees, statements, and general retail-banking
+  product information. It must refuse or deflect requests outside this
+  scope (e.g. coding help, general trivia, medical or legal advice,
+  political opinions, investment advice, or any non-banking topic).
+
 # ---------------------------------------------------------------------------
 # Six pipeline checkpoints (architecture diagram ①…⑥):
 #   ① api_input    — request entering the public chat API
@@ -46,10 +58,39 @@ api_input:
       max_chars: 8000
   - prompt-injection:        # G-02 heuristic backup
       enabled: false
-  - banking-relevance:       # G-03 Intent / scope classifier
-      enabled: false
+  - azure-topic-relevance:   # G-03 Azure managed scope classifier
+      # TESTING: enabled to validate the managed path. Requires a
+      # Custom Category named `non_banking` trained in the Content
+      # Safety resource. If the resource does not support Custom
+      # Categories yet, the call returns 4xx and fail_open allows the
+      # request through -- with the local `topic-relevance` below
+      # DISABLED for this test, off-topic queries WILL leak.
+      enabled: true
+      categories:
+        - non_banking
+      severity_threshold: 2
+      fail_open: true
+      refusal_message: >-
+        I can only help with banking questions - accounts, cards,
+        transfers, loans, ATMs.
+  - topic-relevance:         # G-03 Intent / scope classifier (banking topics)
+      # Local fallback. Re-enabled because the managed
+      # `azure-topic-relevance` above will fail-open on every call
+      # until a Custom Category named `non_banking` is trained &
+      # deployed in the Content Safety resource. Keep this enabled
+      # in production -- it's the only off-topic gate that actually
+      # fires today.
+      enabled: true
+      # Shared scope anchor (same as task-adherence). Guard tokenises
+      # the description, drops stopwords, uses remaining content words
+      # as the in-scope vocabulary. Edit `banking_task:` at top of file
+      # and all scope guards stay in sync.
+      task_definition: *banking_task
       min_ratio: 0.05
-      min_length: 20
+      # Score short queries too ("what is atlanta" is 15 chars). The
+      # whole point of api_input scope-gating is to reject off-topic
+      # questions before they hit the LLM.
+      min_length: 5
       refusal_message: >-
         I can only help with banking questions - accounts, cards,
         transfers, loans, ATMs.
@@ -88,9 +129,6 @@ tool_input:
   - token-limit:             # G-02 oversize args
       enabled: false
       max_chars: 8000
-  - azure-task-adherence:    # G-03a Task Adherence vs user intent
-      enabled: true
-      require_task_definition: false
   - azure-pii-detection:     # G-04 redact PII before outbound call
       enabled: true
       mode: sanitize
@@ -180,10 +218,21 @@ input:
       fail_open: true
 
   # Custom scope guard - keep BankBuddy on banking topics.
-  - banking-relevance:
-      enabled: false   # TEMP: disabled to test OUTPUT guards (task-adherence/bias-detect)
+  # Azure managed counterpart runs first; falls open -> local backup.
+  - azure-topic-relevance:
+      enabled: false
+      categories:
+        - non_banking
+      severity_threshold: 2
+      fail_open: true
+      refusal_message: >-
+        I can only help with banking questions - accounts, cards,
+        transfers, loans, ATMs.
+  - topic-relevance:
+      enabled: true
+      task_definition: *banking_task
       min_ratio: 0.05
-      min_length: 20
+      min_length: 5
       refusal_message: >-
         I can only help with banking questions - accounts, cards,
         transfers, loans, ATMs.
@@ -201,6 +250,30 @@ output:
       mode: sanitize
       min_confidence: 0.3
       categories: *pii_categories
+
+  # Azure managed Task Adherence: DISABLED because the current Content
+  # Safety resource (v-shs-mnwsbnrd-eastus2) does not expose
+  # detectTaskAdherence (returns 404 on every api-version). Re-enable
+  # once the resource is onboarded for the Agent Guardrails preview or
+  # routed to a supported region. The local `task-adherence` guard
+  # below provides runtime scope enforcement in the meantime.
+  - azure-task-adherence:
+      enabled: false
+      task_definition: *banking_task
+      require_task_definition: false
+      api_version: "2024-09-15-preview"
+      fail_open: true
+
+  # Azure managed Groundedness: when the orchestrator supplies
+  # `context["sources"]` (RAG mode), verifies the reply is supported by
+  # them. Skips ALLOW when no sources are provided.
+  - azure-groundedness:
+      enabled: true
+      domain: Generic
+      task: QnA
+      require_sources: false
+      api_version: "2024-09-15-preview"
+      fail_open: true
 
   # Local regex PII fallback on assistant replies (SSN/card/phone/email).
   - pii-detect:
@@ -236,10 +309,31 @@ output:
 
   # Task adherence: runtime enforcement that the reply stays within the
   # declared banking task scope. Complements Foundry's eval-time
-  # TaskAdherenceEvaluator (preview).
+  # TaskAdherenceEvaluator (preview). ENABLED as the active scope guard
+  # while the Azure managed Task Adherence preview is unavailable on
+  # the current Content Safety resource.
+  #
+  # The local guard uses a lightweight keyword engine. To keep policy
+  # authoring DRY, it consumes the SAME free-text `&banking_task`
+  # anchor used by `azure-task-adherence` above: the guard tokenises
+  # the description, drops stopwords, and uses the remaining content
+  # words as its in-scope vocabulary. Edit `banking_task` at the top
+  # of this file and both guards stay in sync.
   - task-adherence:
-      enabled: false
+      enabled: true
       engine: keyword
+      task_definition: *banking_task
+      # Strict mode: any sentence WITHOUT an in-scope keyword (derived
+      # from `task_definition` above) is treated as out-of-scope. No
+      # need to enumerate off-topic vocabulary.
+      strict_in_scope: true
+      block_threshold: 0.34
+      warn_threshold: 0.6
+      min_out_of_scope_sentences: 1
+      min_length: 40
+      block_message: >-
+        I can only help with retail banking topics - accounts, cards,
+        transfers, loans, payments, ATMs, branches, and statements.
 
   # Bias detection: flag stereotype / demographic-skew patterns the
   # Hate-Unfairness harm category does not explicitly cover.
@@ -287,7 +381,7 @@ tool_output:
       categories: *pii_categories
       min_confidence: 0.5
 
-  - banking-relevance:
+  - topic-relevance:
       enabled: false
 
   - output-pii-redact:
