@@ -12,6 +12,7 @@ import re
 from typing import Any
 
 from ..base import Guard, GuardCheckResult, GuardStage
+from ..observability import obs_log
 from ..registry import register_guard
 
 # Each pattern is (regex_string, severity_weight). Score = sum of weights.
@@ -30,7 +31,7 @@ DEFAULT_PATTERNS: list[tuple[str, float]] = [
     (r"\brepeat (?:back|verbatim) your (?:system|initial) prompt\b", 0.95),
 ]
 
-log = __import__("logging").getLogger("agent.guardrails.prompt_injection")
+log = __import__("logging").getLogger("agent.guardrails.prompt_injection")  # noqa: F841  (kept for back-compat; new sites use obs_log)
 
 
 def _coerce_patterns(items: Any) -> list[tuple[str, float]]:
@@ -72,7 +73,12 @@ class PromptInjectionGuard(Guard):
             try:
                 compiled.append((re.compile(expr, re.I), weight))
             except re.error as exc:
-                log.warning("prompt-injection: bad regex %r: %s", expr, exc)
+                obs_log(
+                    "guard.regex_invalid",
+                    level="warning",
+                    guard="prompt-injection",
+                    error=str(exc),
+                )
         self._patterns: list[tuple[re.Pattern[str], float]] = compiled
 
     async def check(self, text: str, *, context: dict[str, Any] | None = None) -> GuardCheckResult:

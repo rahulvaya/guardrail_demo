@@ -25,11 +25,10 @@ or fail-closed; we deliberately do not raise here.
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from typing import Any
 
-log = logging.getLogger("guardrails.aad_cache")
+from .observability import obs_log
 
 REFRESH_SKEW_SECONDS = 300  # refresh 5 minutes before expiry
 
@@ -82,14 +81,19 @@ async def get_bearer_token(scope: str) -> str | None:
             # default executor to avoid stalling the event loop.
             access = await loop.run_in_executor(None, cred.get_token, scope)
         except Exception as e:  # noqa: BLE001
-            log.warning("aad-cache: refresh failed scope=%s err=%r", scope, e)
+            obs_log(
+                "aad.token_refresh_failed",
+                level="warning",
+                scope=scope,
+                error_type=type(e).__name__,
+            )
             return None
 
         _tokens[scope] = (access.token, float(access.expires_on))
-        log.info(
-            "aad-cache: refreshed scope=%s ttl=%ds",
-            scope,
-            int(access.expires_on - now),
+        obs_log(
+            "aad.token_refreshed",
+            scope=scope,
+            ttl_seconds=int(access.expires_on - now),
         )
         return access.token
 

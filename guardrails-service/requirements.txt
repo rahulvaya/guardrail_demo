@@ -11,3 +11,11 @@ PyJWT[crypto]>=2.9.0
 
 # Required by the copied guards (Azure AAD token acquisition fallback).
 azure-identity>=1.19.0
+
+# Observability:
+#   * prometheus-client powers GET /metrics (histograms, counters, gauges).
+#     Without it, /metrics returns 503 and metric calls become no-ops.
+#     The service does NOT ship spans/traces itself; it emits structured
+#     JSON logs to stdout and exposes a Prometheus scrape endpoint.
+#     Consumers forward logs into their own telemetry stack.
+prometheus-client>=0.20.0

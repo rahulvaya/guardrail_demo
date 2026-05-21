@@ -27,7 +27,6 @@ Public surface for subclasses:
 """
 from __future__ import annotations
 
-import logging
 import os
 from typing import Any, ClassVar
 
@@ -36,12 +35,11 @@ import httpx
 from ..aad_cache import get_bearer_token
 from ..azure_http import get_client
 from ..base import Guard, GuardCheckResult
+from ..observability import obs_log
 from .azure_endpoints import (
     COGNITIVE_SERVICES_AAD_SCOPE,
     CONTENT_SAFETY_API_VERSION,
 )
-
-log = logging.getLogger("guardrails.azure_base")
 
 
 def _first_env(names: tuple[str, ...]) -> str:
@@ -85,10 +83,12 @@ class AzureGuardBase(Guard):
         self.fail_open: bool = bool(config.get("fail_open", True))
 
         if not self.endpoint:
-            log.warning(
-                "%s: no endpoint configured (set %s); guard will fail-%s",
-                self.name, "/".join(self.ENDPOINT_ENV_VARS),
-                "open" if self.fail_open else "closed",
+            obs_log(
+                "guard.azure.no_endpoint",
+                level="warning",
+                guard=self.name,
+                env_vars=list(self.ENDPOINT_ENV_VARS),
+                fail_mode="open" if self.fail_open else "closed",
             )
 
     # ------------------------------------------------------------------
@@ -135,7 +135,12 @@ class AzureGuardBase(Guard):
             if token:
                 return {"Authorization": f"Bearer {token}"}
         except Exception as e:  # noqa: BLE001
-            log.warning("%s: AAD auth unavailable: %r", self.name, e)
+            obs_log(
+                "guard.azure.aad_unavailable",
+                level="warning",
+                guard=self.name,
+                error_type=type(e).__name__,
+            )
         return {}
 
     async def _prepare_request(
@@ -216,9 +221,19 @@ class AzureGuardBase(Guard):
             meta.update(extra_meta)
 
         if self.fail_open:
-            log.warning("%s fail-open: %s", self.name, reason)
+            obs_log(
+                "guard.azure.fail_open",
+                level="warning",
+                guard=self.name,
+                reason=reason,
+            )
             return self._allow(text, metadata=meta)
-        log.warning("%s fail-closed: %s", self.name, reason)
+        obs_log(
+            "guard.azure.fail_closed",
+            level="warning",
+            guard=self.name,
+            reason=reason,
+        )
         return self._block(
             text,
             reasons=[f"{self.name} unavailable: {reason}"],

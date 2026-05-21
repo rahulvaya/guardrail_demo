@@ -7,13 +7,11 @@ corpus.
 """
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from ..base import Guard, GuardCheckResult, GuardStage
+from ..observability import obs_log
 from ..registry import register_guard
-
-log = logging.getLogger("agent.guardrails.toxicity")
 
 # Minimal placeholder list - replace via GUARD_TOXICITY_CONFIG='{"words":[...]}'.
 DEFAULT_WORDS = ["idiot", "stupid", "moron", "shut up"]
@@ -35,7 +33,14 @@ class ToxicityGuard(Guard):
                 from detoxify import Detoxify  # type: ignore
                 self._detox = Detoxify("original-small")
             except Exception:  # noqa: BLE001
-                log.warning("detoxify not available; falling back to keyword engine")
+                obs_log(
+                    "guard.engine_fallback",
+                    level="warning",
+                    guard="toxicity",
+                    requested_engine="detoxify",
+                    fallback_engine="keyword",
+                    reason="detoxify not available",
+                )
                 self.engine = "keyword"
 
     async def check(self, text: str, *, context: dict[str, Any] | None = None) -> GuardCheckResult:

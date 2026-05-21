@@ -22,7 +22,6 @@ AAD configuration is fully env-driven (see ``settings.py``):
 """
 from __future__ import annotations
 
-import logging
 import secrets
 import time
 from typing import Any
@@ -30,9 +29,8 @@ from typing import Any
 import httpx
 from fastapi import Header, HTTPException, status
 
+from .core.observability import obs_log
 from .settings import get_settings
-
-log = logging.getLogger("guardrails.auth")
 
 try:  # PyJWT is required for AAD mode; static-only deployments can omit it.
     import jwt
@@ -64,7 +62,7 @@ def _fetch_openid_config(tenant_id: str) -> dict[str, Any]:
     if cached and now - cached[0] < _DISCOVERY_CACHE_TTL_S:
         return cached[1]
     url = _openid_config_url(tenant_id)
-    log.info("fetching OpenID configuration: %s", url)
+    obs_log("auth.aad_discovery_fetch", tenant_id=tenant_id, url=url)
     r = httpx.get(url, timeout=10.0)
     r.raise_for_status()
     doc = r.json()
@@ -95,7 +93,7 @@ def _check_static_token(presented: str) -> bool:
 def _check_aad_token(presented: str) -> None:
     """Validate an AAD-issued JWT. Raises HTTPException on failure."""
     if not _PYJWT_AVAILABLE:
-        log.error("AAD auth requested but PyJWT is not installed")
+        obs_log("auth.aad_pyjwt_missing", level="error")
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "AAD auth not available: install PyJWT[crypto]",
@@ -105,7 +103,12 @@ def _check_aad_token(presented: str) -> None:
     tenant_id = s.aad_tenant_id
     audience = s.aad_audience
     if not tenant_id or not audience:
-        log.error("AAD auth requested but tenant_id / audience are not configured")
+        obs_log(
+            "auth.aad_misconfigured",
+            level="error",
+            tenant_id_set=bool(tenant_id),
+            audience_set=bool(audience),
+        )
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "guardrails AAD auth misconfigured (tenant_id / audience missing)",
@@ -132,14 +135,22 @@ def _check_aad_token(presented: str) -> None:
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
-        log.warning("AAD JWT validation failed: %r", e)
+        obs_log(
+            "auth.aad_jwt_invalid",
+            level="warning",
+            error_type=type(e).__name__,
+        )
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid AAD token") from e
 
     allowed = [a.strip() for a in (s.aad_allowed_appids or "").split(",") if a.strip()]
     if allowed:
         appid = claims.get("appid") or claims.get("azp")
         if appid not in allowed:
-            log.warning("AAD token rejected: appid=%s not in allow-list", appid)
+            obs_log(
+                "auth.aad_appid_rejected",
+                level="warning",
+                appid=str(appid) if appid else None,
+            )
             raise HTTPException(status.HTTP_403_FORBIDDEN, "caller not authorized")
 
 

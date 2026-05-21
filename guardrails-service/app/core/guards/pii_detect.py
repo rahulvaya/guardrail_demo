@@ -11,14 +11,12 @@ mentions an email address. Switch to BLOCK by setting
 """
 from __future__ import annotations
 
-import logging
 import re
 from typing import Any
 
 from ..base import Guard, GuardCheckResult, GuardStage
+from ..observability import obs_log
 from ..registry import register_guard
-
-log = logging.getLogger("agent.guardrails.pii_detect")
 
 # Conservative regex set. Each entry: label -> {regex, mask}.
 # Configurable via policy YAML: override the whole set with ``patterns``
@@ -52,7 +50,13 @@ def _compile_patterns(spec: dict[str, Any]) -> list[tuple[str, re.Pattern[str], 
                 continue
             out.append((str(label), re.compile(expr), mask))
         except re.error as exc:
-            log.warning("pii-detect: bad regex %r for %r: %s", expr, label, exc)
+            obs_log(
+                "guard.regex_invalid",
+                level="warning",
+                guard="pii-detect",
+                label=str(label),
+                error=str(exc),
+            )
     return out
 
 
@@ -76,7 +80,14 @@ class PiiDetectGuard(Guard):
                 from presidio_analyzer import AnalyzerEngine  # type: ignore
                 self._presidio = AnalyzerEngine()
             except Exception:  # noqa: BLE001
-                log.warning("presidio-analyzer not available; falling back to regex")
+                obs_log(
+                    "guard.engine_fallback",
+                    level="warning",
+                    guard="pii-detect",
+                    requested_engine="presidio",
+                    fallback_engine="regex",
+                    reason="presidio_analyzer not available",
+                )
                 self.engine = "regex"
 
     async def check(self, text: str, *, context: dict[str, Any] | None = None) -> GuardCheckResult:

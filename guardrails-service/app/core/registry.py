@@ -14,15 +14,13 @@ Configuration sources (in priority order, highest wins):
 from __future__ import annotations
 
 import json
-import logging
 import os
 from typing import Callable
 
 from ..settings import Settings
 from .base import Guard, GuardStage
+from .observability import obs_log
 from .pipeline import GuardrailPipeline
-
-log = logging.getLogger("agent.guardrails.registry")
 
 # name -> factory(config dict) -> Guard
 _REGISTRY: dict[str, Callable[[dict], Guard]] = {}
@@ -31,7 +29,7 @@ _REGISTRY: dict[str, Callable[[dict], Guard]] = {}
 def register_guard(name: str, factory: Callable[[dict], Guard]) -> None:
     """Register a guard factory under `name`. Idempotent."""
     if name in _REGISTRY:
-        log.debug("guard %s already registered; overriding", name)
+        obs_log("registry.guard_overridden", level="debug", guard=name)
     _REGISTRY[name] = factory
 
 
@@ -64,7 +62,9 @@ def _env_json(key: str) -> dict:
         v = json.loads(raw)
         return v if isinstance(v, dict) else {}
     except json.JSONDecodeError:
-        log.warning("guardrails: %s is not valid JSON; ignoring", key)
+        obs_log(
+            "registry.env_json_invalid", level="warning", env_var=key
+        )
         return {}
 
 
@@ -132,16 +132,28 @@ def build_pipeline_from_settings(settings: Settings) -> GuardrailPipeline:
         guards_out: list[Guard] = []
         for name, default_on in order:
             if not _is_enabled(name, default=default_on, master=master):
-                log.info("guardrail %s [%s] disabled", name, stage_label)
+                obs_log(
+                    "registry.guard_disabled",
+                    guard=name,
+                    stage=stage_label,
+                )
                 continue
             guard = build_guard(name, _config_for(name))
             if guard.stage not in allowed_stages:
-                log.warning(
-                    "guard %s declared stage=%s but is in %s order; running anyway",
-                    name, guard.stage, stage_label.upper(),
+                obs_log(
+                    "registry.guard_stage_mismatch",
+                    level="warning",
+                    guard=name,
+                    guard_stage=str(guard.stage),
+                    stage=stage_label,
                 )
             guards_out.append(guard)
-            log.info("guardrail %s [%s] enabled config=%s", name, stage_label, guard.config)
+            obs_log(
+                "registry.guard_enabled",
+                guard=name,
+                stage=stage_label,
+                config_keys=sorted((guard.config or {}).keys()),
+            )
         return guards_out
 
     input_guards = _build_stage(
@@ -152,6 +164,10 @@ def build_pipeline_from_settings(settings: Settings) -> GuardrailPipeline:
     )
 
     if not master:
-        log.warning("GUARDRAILS_ENABLED=false - all guards disabled (Phase 1 behavior)")
+        obs_log(
+            "registry.master_disabled",
+            level="warning",
+            env_var="GUARDRAILS_ENABLED",
+        )
 
     return GuardrailPipeline(input_guards=input_guards, output_guards=output_guards)

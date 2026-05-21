@@ -18,14 +18,12 @@ string in config if you prefer full opacity.
 """
 from __future__ import annotations
 
-import logging
 import re
 from typing import Any, Callable
 
 from ..base import Guard, GuardCheckResult, GuardStage
+from ..observability import obs_log
 from ..registry import register_guard
-
-log = logging.getLogger("agent.guardrails.output_pii_redact")
 
 
 def _mask_card(s: str) -> str:
@@ -65,7 +63,13 @@ def _compile_patterns(spec: dict[str, Any]) -> list[tuple[str, re.Pattern[str], 
             repl: Any = _MASK_FUNCS.get(str(mask_spec), mask_spec)
             out.append((str(label), re.compile(expr), repl))
         except re.error as exc:
-            log.warning("output-pii-redact: bad regex %r for %r: %s", expr, label, exc)
+            obs_log(
+                "guard.regex_invalid",
+                level="warning",
+                guard="output-pii-redact",
+                label=str(label),
+                error=str(exc),
+            )
     return out
 
 

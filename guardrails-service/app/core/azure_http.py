@@ -17,11 +17,9 @@ With one shared client tuned as below, parallel guards in a stage cost
 """
 from __future__ import annotations
 
-import logging
-
 import httpx
 
-log = logging.getLogger("guardrails.azure_http")
+from .observability import obs_log
 
 _client: httpx.AsyncClient | None = None
 
@@ -51,10 +49,20 @@ def get_client(timeout: float = 10.0) -> httpx.AsyncClient:
                 http2=True,
                 limits=_LIMITS,
             )
-            log.info("azure-http: shared client created http2=True limits=%s", _LIMITS)
+            obs_log(
+                "azure_http.client_created",
+                http2=True,
+                max_connections=_LIMITS.max_connections,
+                max_keepalive=_LIMITS.max_keepalive_connections,
+                keepalive_expiry=_LIMITS.keepalive_expiry,
+            )
         except Exception as e:  # noqa: BLE001
             # h2 missing or otherwise rejected -> fall back to HTTP/1.1.
-            log.warning("azure-http: HTTP/2 unavailable, using HTTP/1.1: %r", e)
+            obs_log(
+                "azure_http.http2_unavailable",
+                level="warning",
+                error_type=type(e).__name__,
+            )
             _client = httpx.AsyncClient(timeout=timeout, limits=_LIMITS)
     return _client
 
@@ -78,6 +86,10 @@ async def prewarm(endpoint: str) -> None:
         # A bare GET to the resource root returns 404/401 quickly -- both
         # are fine, the connection is what we want.
         await client.get(endpoint.rstrip("/") + "/", timeout=5.0)
-        log.info("azure-http: prewarmed connection to %s", endpoint)
+        obs_log("azure_http.prewarmed", endpoint=endpoint)
     except Exception as e:  # noqa: BLE001
-        log.info("azure-http: prewarm to %s skipped (%r)", endpoint, e)
+        obs_log(
+            "azure_http.prewarm_skipped",
+            endpoint=endpoint,
+            error_type=type(e).__name__,
+        )

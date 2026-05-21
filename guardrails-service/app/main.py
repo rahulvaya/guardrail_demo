@@ -15,18 +15,25 @@ Endpoints:
 from __future__ import annotations
 
 import json
-import logging
 import os
 import time
-import uuid
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 
 from .api import CheckRequest, CheckResponse, GuardOutcome, PolicySummary
 from .auth import require_bearer
+from .core.observability import (
+    current_request_id,
+    metrics_response,
+    obs_log,
+    set_override_cache_size,
+    setup_logging,
+    text_fingerprint,
+    tracing_middleware,
+)
 from .core.pipeline import GuardrailPipeline
 from .policies.loader import (
     Policy,
@@ -37,29 +44,43 @@ from .policies.loader import (
 )
 from .settings import get_settings
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-log = logging.getLogger("guardrails")
+# Install structured JSON logging on stdout. The service emits one
+# JSON line per event (boot, policy load, check, guard decision). It
+# does NOT ship spans/traces itself - consumers are expected to forward
+# these logs into their own telemetry stack (ELK, Loki, App Insights, ...)
+# and scrape `/metrics` from their existing Prometheus.
+setup_logging(os.getenv("GUARDRAILS_LOG_LEVEL", "INFO"))
 
 settings = get_settings()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("guardrails service boot: policies_dir=%s default=%s",
-             settings.policies_dir, settings.default_policy_id)
+    obs_log(
+        "service.boot",
+        policies_dir=str(settings.policies_dir),
+        default_policy=settings.default_policy_id,
+    )
     policies = load_policies(settings.policies_dir)
     pipelines: dict[str, GuardrailPipeline] = {}
     for pid, policy in policies.items():
         try:
             pipelines[pid] = build_pipeline(policy)
-            log.info("built pipeline for policy %s", pid)
+            obs_log("policy.pipeline_built", policy_id=pid)
         except Exception as e:  # noqa: BLE001
-            log.exception("failed to build pipeline for %s: %s", pid, e)
+            obs_log(
+                "policy.pipeline_build_failed",
+                level="error",
+                policy_id=pid,
+                error_type=type(e).__name__,
+                exc_info=True,
+            )
 
     if settings.default_policy_id not in pipelines:
-        log.error(
-            "default policy %s not loaded; service will only accept explicit policy_id",
-            settings.default_policy_id,
+        obs_log(
+            "policy.default_missing",
+            level="error",
+            default_policy=settings.default_policy_id,
         )
 
     app.state.policies = policies
@@ -74,6 +95,7 @@ async def lifespan(app: FastAPI):
     app.state.override_pipelines_max = int(
         os.getenv("GUARDRAILS_OVERRIDE_CACHE_MAX", "64")
     )
+    set_override_cache_size(0)
 
     # Prewarm one TCP+TLS (+HTTP/2) connection to the Azure Cognitive
     # Services endpoint so the first user prompt doesn't pay handshake
@@ -84,7 +106,7 @@ async def lifespan(app: FastAPI):
             from .core.azure_http import prewarm
             await prewarm(cs_endpoint)
         except Exception:  # noqa: BLE001
-            log.debug("azure-http prewarm failed", exc_info=True)
+            obs_log("azure_http.prewarm_failed", level="debug", exc_info=True)
 
     try:
         yield
@@ -93,20 +115,33 @@ async def lifespan(app: FastAPI):
             try:
                 await p.aclose()
             except Exception:  # noqa: BLE001
-                log.debug("error closing pipeline", exc_info=True)
+                obs_log("pipeline.close_failed", level="debug", exc_info=True)
         for p in app.state.override_pipelines.values():
             try:
                 await p.aclose()
             except Exception:  # noqa: BLE001
-                log.debug("error closing override pipeline", exc_info=True)
+                obs_log(
+                    "override_pipeline.close_failed", level="debug", exc_info=True
+                )
         try:
             from .core.azure_http import aclose as _azure_http_aclose
             await _azure_http_aclose()
         except Exception:  # noqa: BLE001
-            log.debug("error closing shared azure http client", exc_info=True)
+            obs_log("azure_http.close_failed", level="debug", exc_info=True)
 
 
 app = FastAPI(title="Guardrails Service", version="1.0.0", lifespan=lifespan)
+app.middleware("http")(tracing_middleware)
+
+
+# ---------------------------------------------------------------------------
+# Metrics  (Prometheus scrape endpoint, no auth - typical Prometheus setup)
+# ---------------------------------------------------------------------------
+
+@app.get("/metrics")
+def metrics() -> Response:
+    payload, content_type, code = metrics_response()
+    return Response(content=payload, media_type=content_type, status_code=code)
 
 
 # ---------------------------------------------------------------------------
@@ -216,8 +251,17 @@ async def check(req: CheckRequest) -> CheckResponse:
                 try:
                     await evicted.aclose()
                 except Exception:  # noqa: BLE001
-                    log.debug("error closing evicted override pipeline", exc_info=True)
-            log.info("built override pipeline for policy=%s overrides=%s", pid, req.overrides)
+                    obs_log(
+                        "override_pipeline.evict_close_failed",
+                        level="debug",
+                        exc_info=True,
+                    )
+            set_override_cache_size(len(cache))
+            obs_log(
+                "override_pipeline.built",
+                policy_id=pid,
+                override_keys=sorted(req.overrides.keys()),
+            )
         else:
             # Cache hit: refresh recency.
             cache.move_to_end(cache_key)
@@ -229,7 +273,7 @@ async def check(req: CheckRequest) -> CheckResponse:
                 f"policy {pid} known but pipeline failed to build at boot",
             )
 
-    request_id = str(uuid.uuid4())
+    request_id = current_request_id() or ""
     started = time.perf_counter()
 
     # Aliases: callers may send llm_input/llm_output for clarity; map to the
@@ -240,6 +284,12 @@ async def check(req: CheckRequest) -> CheckResponse:
         stage = "input"
     elif stage == "llm_output":
         stage = "output"
+
+    # Publish request context for the duration of this call so every
+    # downstream obs_log emitted by guards / pipeline carries policy_id
+    # and the canonical stage tag automatically.
+    from .core.observability import set_request_context as _set_ctx
+    _set_ctx(policy_id=pid, stage=stage)
 
     if stage == "api_input":
         pr = await pipeline.check_api_input(req.text, context=req.context)
@@ -274,10 +324,18 @@ async def check(req: CheckRequest) -> CheckResponse:
         for c in pr.checks
     ]
 
-    log.info(
-        "check policy=%s stage=%s decision=%s duration_ms=%.1f request_id=%s",
-        pid, req.stage, decision, pr.duration_ms, request_id,
-    )
+    log_fields: dict[str, Any] = {
+        "policy_id": pid,
+        "requested_stage": req.stage,
+        "stage": stage,
+        "decision": decision,
+        "duration_ms": round(pr.duration_ms, 2),
+        "guard_count": len(guards),
+        "block_categories": pr.block_categories,
+        "override_keys": sorted(req.overrides.keys()) if req.overrides else [],
+    }
+    log_fields.update(text_fingerprint(req.text))
+    obs_log("check.completed", **log_fields)
 
     return CheckResponse(
         decision=decision,  # type: ignore[arg-type]

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -13,14 +12,13 @@ import yaml
 
 # The copied guard implementations live under app.core (see Dockerfile).
 from ..core.base import Guard, GuardStage, is_input_family, is_output_family
+from ..core.observability import obs_log
 from ..core.pipeline import GuardrailPipeline
 from ..core.registry import build_guard, registered_names
 
 # Importing the guards package triggers self-registration of every guard
 # under its canonical hyphenated name in the registry.
 from ..core import guards as _guards  # noqa: F401  (side-effect)
-
-log = logging.getLogger("guardrails.policy")
 
 
 @dataclass
@@ -92,7 +90,7 @@ def _normalize_specs(items: list[Any] | None) -> list[tuple[str, dict[str, Any]]
             cfg = dict(cfg or {})
             enabled = cfg.pop("enabled", True)
             if not enabled:
-                log.info("guard %s disabled by policy (enabled: false)", name)
+                obs_log("policy.guard_disabled_by_policy", guard=name)
                 continue
             out.append((name, cfg))
         else:
@@ -137,7 +135,9 @@ def load_policies(policies_dir: str) -> dict[str, Policy]:
     for p in raw_parts:
         path = Path(p.strip())
         if not path.exists():
-            log.warning("policies_dir does not exist: %s", path)
+            obs_log(
+                "policy.dir_missing", level="warning", path=str(path)
+            )
             continue
         paths.append(path)
     if not paths:
@@ -152,13 +152,23 @@ def load_policies(policies_dir: str) -> dict[str, Policy]:
         try:
             doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except yaml.YAMLError as e:
-            log.error("failed to parse %s: %s", path.name, e)
+            obs_log(
+                "policy.parse_error",
+                level="error",
+                file=path.name,
+                error_type=type(e).__name__,
+            )
             continue
         doc = _expand_env(doc, source=path.name)
         try:
             policy = _parse_policy(doc, path)
         except ValueError as e:
-            log.error("invalid policy %s: %s", path.name, e)
+            obs_log(
+                "policy.invalid",
+                level="error",
+                file=path.name,
+                error_type=type(e).__name__,
+            )
             continue
 
         # Validate every guard name resolves so failures surface at boot,
@@ -166,20 +176,24 @@ def load_policies(policies_dir: str) -> dict[str, Policy]:
         all_names = policy.all_guard_names
         unknown = [n for n in all_names if n not in registered_names()]
         if unknown:
-            log.error("policy %s references unknown guards: %s", policy.id, unknown)
+            obs_log(
+                "policy.unknown_guards",
+                level="error",
+                policy_id=policy.id,
+                unknown_guards=unknown,
+            )
             continue
 
         policies[policy.id] = policy
-        log.info(
-            "loaded policy %s: api_input=%s input=%s tool_input=%s "
-            "output=%s tool_output=%s api_output=%s",
-            policy.id,
-            policy.api_input_guard_names,
-            policy.input_guard_names,
-            policy.tool_input_guard_names,
-            policy.output_guard_names,
-            policy.tool_output_guard_names,
-            policy.api_output_guard_names,
+        obs_log(
+            "policy.loaded",
+            policy_id=policy.id,
+            api_input_guards=policy.api_input_guard_names,
+            input_guards=policy.input_guard_names,
+            tool_input_guards=policy.tool_input_guard_names,
+            output_guards=policy.output_guard_names,
+            tool_output_guards=policy.tool_output_guard_names,
+            api_output_guards=policy.api_output_guard_names,
         )
 
     return policies
@@ -200,9 +214,21 @@ def build_pipeline(policy: Policy) -> GuardrailPipeline:
             merged = {**cfg, **env_cfg}
             g = build_guard(name, merged)
             if family == "input" and not (is_input_family(g.stage) or g.stage == GuardStage.BOTH):
-                log.warning("guard %s stage=%s in %s block (mismatch)", name, g.stage, block_label)
+                obs_log(
+                    "policy.guard_stage_mismatch",
+                    level="warning",
+                    guard=name,
+                    guard_stage=str(g.stage),
+                    block=block_label,
+                )
             elif family == "output" and not (is_output_family(g.stage) or g.stage == GuardStage.BOTH):
-                log.warning("guard %s stage=%s in %s block (mismatch)", name, g.stage, block_label)
+                obs_log(
+                    "policy.guard_stage_mismatch",
+                    level="warning",
+                    guard=name,
+                    guard_stage=str(g.stage),
+                    block=block_label,
+                )
             guards.append(g)
         return guards
 
@@ -227,7 +253,11 @@ def _env_override(guard_name: str) -> dict[str, Any]:
         v = json.loads(raw)
         return v if isinstance(v, dict) else {}
     except json.JSONDecodeError:
-        log.warning("invalid JSON in GUARD_%s_CONFIG_OVERRIDE; ignoring", upper)
+        obs_log(
+            "policy.env_override_invalid_json",
+            level="warning",
+            env_var=f"GUARD_{upper}_CONFIG_OVERRIDE",
+        )
         return {}
 
 
@@ -271,9 +301,12 @@ def _expand_env(node: Any, *, source: str = "") -> Any:
         raw = os.environ.get(var)
         if raw is None:
             if default is None:
-                log.warning(
-                    "policy %s references unset env var ${%s}; leaving as empty string",
-                    source, var,
+                obs_log(
+                    "policy.env_var_unset",
+                    level="warning",
+                    source=source,
+                    env_var=var,
+                    substitution="empty_string",
                 )
                 return ""
             raw = default
@@ -285,9 +318,12 @@ def _expand_env(node: Any, *, source: str = "") -> Any:
         raw = os.environ.get(var)
         if raw is None:
             if default is None:
-                log.warning(
-                    "policy %s references unset env var ${%s}; substituting empty",
-                    source, var,
+                obs_log(
+                    "policy.env_var_unset",
+                    level="warning",
+                    source=source,
+                    env_var=var,
+                    substitution="empty",
                 )
                 return ""
             return default

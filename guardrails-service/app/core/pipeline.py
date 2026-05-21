@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from .base import Guard, GuardCheckResult, GuardDecision, GuardStage
-
-log = logging.getLogger("agent.guardrails")
+from .observability import (
+    obs_log,
+    record_guard,
+    record_guard_error,
+    record_stage,
+    safe_reasons,
+    set_request_context,
+)
 
 # Run guards within a stage in parallel by default. Set
 # GUARDRAILS_SEQUENTIAL=1 to fall back to the legacy sequential behaviour
@@ -123,6 +128,9 @@ class GuardrailPipeline:
         stage: GuardStage,
         context: dict[str, Any] | None,
     ) -> PipelineResult:
+        # Publish the stage on the observability contextvar so every
+        # log/metric emitted by guards is tagged with it automatically.
+        set_request_context(stage=stage.value)
         started = time.perf_counter()
         current = text
         checks: list[GuardCheckResult] = []
@@ -136,13 +144,54 @@ class GuardrailPipeline:
         guard_context.setdefault("stage", stage.value)
 
         if not guards:
+            duration_s = time.perf_counter() - started
+            record_stage(decision="allow", duration_seconds=duration_s)
             return PipelineResult(
                 allowed=True,
                 sanitized_text=current,
                 stage=stage,
                 checks=[],
-                duration_ms=(time.perf_counter() - started) * 1000.0,
+                duration_ms=duration_s * 1000.0,
             )
+
+        async def _timed(g: Guard) -> tuple[GuardCheckResult, float]:
+            """Run one guard, recording timing + metrics. Never raises."""
+            t0 = time.perf_counter()
+            try:
+                r = await g.check(text, context=guard_context)
+            except Exception as e:  # noqa: BLE001
+                dur = time.perf_counter() - t0
+                obs_log(
+                    "guard.crashed",
+                    level="error",
+                    guard=g.name,
+                    error_type=type(e).__name__,
+                    duration_ms=dur * 1000.0,
+                    exc_info=True,
+                )
+                record_guard_error(guard=g.name)
+                record_guard(
+                    guard=g.name, decision="error", duration_seconds=dur,
+                )
+                return (
+                    GuardCheckResult(
+                        guard_name=g.name,
+                        decision=GuardDecision.ALLOW,
+                        sanitized_text=text,
+                        # NOTE: error repr could in theory contain a slice of
+                        # user text. Keep it out of `reasons` to be safe.
+                        reasons=[f"guard-error: {type(e).__name__}"],
+                    ),
+                    dur,
+                )
+            dur = time.perf_counter() - t0
+            record_guard(
+                guard=g.name,
+                decision=r.decision.value,
+                duration_seconds=dur,
+                categories=list(r.categories or []),
+            )
+            return (r, dur)
 
         if _PARALLEL and len(guards) > 1:
             # Fan-out: run every guard against the ORIGINAL text concurrently.
@@ -154,25 +203,10 @@ class GuardrailPipeline:
             # guards are independent classifiers; if you have a guard that
             # truly depends on a peer's sanitized output, set
             # GUARDRAILS_SEQUENTIAL=1.
-            async def _safe(g: Guard) -> GuardCheckResult:
-                try:
-                    return await g.check(text, context=guard_context)
-                except Exception as e:  # noqa: BLE001
-                    log.exception("guard %s crashed; treating as ALLOW", g.name)
-                    return GuardCheckResult(
-                        guard_name=g.name,
-                        decision=GuardDecision.ALLOW,
-                        sanitized_text=text,
-                        reasons=[f"guard-error: {e!r}"],
-                    )
-
-            # Schedule one task per guard, keyed by declaration index so we
-            # can preserve trace order at the end regardless of which task
-            # completes first.
-            tasks: list[asyncio.Task[GuardCheckResult]] = [
-                asyncio.create_task(_safe(g)) for g in guards
+            tasks: list[asyncio.Task[tuple[GuardCheckResult, float]]] = [
+                asyncio.create_task(_timed(g)) for g in guards
             ]
-            results: list[GuardCheckResult | None] = [None] * len(guards)
+            results: list[tuple[GuardCheckResult, float] | None] = [None] * len(guards)
             task_to_idx = {t: i for i, t in enumerate(tasks)}
 
             if _CANCEL_ON_BLOCK:
@@ -182,87 +216,113 @@ class GuardrailPipeline:
                 first_block_seen = False
                 for fut in asyncio.as_completed(tasks):
                     try:
-                        result = await fut
+                        result_tuple = await fut
                     except asyncio.CancelledError:
                         # Happens when we already started cancelling peers.
                         continue
-                    # Identify which task this future belonged to.
                     done_task = next(
                         (t for t in tasks if t.done() and results[task_to_idx[t]] is None),
                         None,
                     )
                     if done_task is None:
                         continue
-                    results[task_to_idx[done_task]] = result
-                    if result.decision == GuardDecision.BLOCK and not first_block_seen:
+                    results[task_to_idx[done_task]] = result_tuple
+                    if (
+                        result_tuple[0].decision == GuardDecision.BLOCK
+                        and not first_block_seen
+                    ):
                         first_block_seen = True
-                        # Cancel everything still pending.
                         for t in tasks:
                             if not t.done():
                                 t.cancel()
-                        # Await cancellations so we don't leak tasks; their
-                        # synthetic "cancelled" results are filled in below.
                         await asyncio.gather(*tasks, return_exceptions=True)
                         break
                 # Fill in synthetic results for any guard whose task got
                 # cancelled (or never completed for some other reason).
                 for i, g in enumerate(guards):
                     if results[i] is None:
-                        results[i] = GuardCheckResult(
-                            guard_name=g.name,
-                            decision=GuardDecision.ALLOW,
-                            sanitized_text=text,
-                            reasons=["cancelled: peer guard blocked first"],
-                            metadata={"cancelled": True},
+                        results[i] = (
+                            GuardCheckResult(
+                                guard_name=g.name,
+                                decision=GuardDecision.ALLOW,
+                                sanitized_text=text,
+                                reasons=["cancelled: peer guard blocked first"],
+                                metadata={"cancelled": True},
+                            ),
+                            0.0,
                         )
-                resolved: list[GuardCheckResult] = [r for r in results if r is not None]
+                resolved: list[tuple[GuardCheckResult, float]] = [
+                    r for r in results if r is not None
+                ]
             else:
                 resolved = await asyncio.gather(*tasks)
 
             # Walk results in declaration order so traces and the
             # "first block wins" semantic are preserved.
-            for guard, result in zip(guards, resolved):
+            for guard, (result, dur) in zip(guards, resolved):
                 checks.append(result)
                 if result.decision == GuardDecision.BLOCK:
                     if not blocked:
                         blocked = True
+                        # Full reasons go to the API caller via the
+                        # PipelineResult; they are NEVER logged because
+                        # ``banned-substrings`` puts the matched user text
+                        # in `reasons`.
                         block_reasons.extend(result.reasons or [f"blocked by {guard.name}"])
                         block_categories.extend(result.categories)
-                    log.warning(
-                        "guardrail BLOCK stage=%s guard=%s reasons=%s",
-                        stage.value, guard.name, result.reasons,
+                    obs_log(
+                        "guard.block",
+                        level="warning",
+                        guard=guard.name,
+                        categories=list(result.categories or []),
+                        reasons_redacted=safe_reasons(result.reasons),
+                        duration_ms=dur * 1000.0,
                     )
                 elif result.decision == GuardDecision.SANITIZE and not blocked:
-                    log.info(
-                        "guardrail SANITIZE stage=%s guard=%s reasons=%s",
-                        stage.value, guard.name, result.reasons,
+                    obs_log(
+                        "guard.sanitize",
+                        level="info",
+                        guard=guard.name,
+                        categories=list(result.categories or []),
+                        reasons_redacted=safe_reasons(result.reasons),
+                        duration_ms=dur * 1000.0,
                     )
                     current = result.sanitized_text
         else:
             for guard in guards:
-                try:
-                    result = await guard.check(current, context=guard_context)
-                except Exception as e:  # noqa: BLE001 - guards must never crash the pipeline
-                    log.exception("guard %s crashed; treating as ALLOW", guard.name)
-                    result = GuardCheckResult(
-                        guard_name=guard.name,
-                        decision=GuardDecision.ALLOW,
-                        sanitized_text=current,
-                        reasons=[f"guard-error: {e!r}"],
-                    )
+                result, dur = await _timed(guard)
                 checks.append(result)
-
                 if result.decision == GuardDecision.BLOCK:
                     blocked = True
                     block_reasons.extend(result.reasons or [f"blocked by {guard.name}"])
                     block_categories.extend(result.categories)
-                    log.warning("guardrail BLOCK stage=%s guard=%s reasons=%s",
-                                stage.value, guard.name, result.reasons)
+                    obs_log(
+                        "guard.block",
+                        level="warning",
+                        guard=guard.name,
+                        categories=list(result.categories or []),
+                        reasons_redacted=safe_reasons(result.reasons),
+                        duration_ms=dur * 1000.0,
+                    )
                     break
                 if result.decision == GuardDecision.SANITIZE:
-                    log.info("guardrail SANITIZE stage=%s guard=%s reasons=%s",
-                             stage.value, guard.name, result.reasons)
+                    obs_log(
+                        "guard.sanitize",
+                        level="info",
+                        guard=guard.name,
+                        categories=list(result.categories or []),
+                        reasons_redacted=safe_reasons(result.reasons),
+                        duration_ms=dur * 1000.0,
+                    )
                     current = result.sanitized_text
+
+        duration_s = time.perf_counter() - started
+        decision_label = "block" if blocked else (
+            "sanitize"
+            if any(c.decision == GuardDecision.SANITIZE for c in checks)
+            else "allow"
+        )
+        record_stage(decision=decision_label, duration_seconds=duration_s)
 
         return PipelineResult(
             allowed=not blocked,
@@ -271,7 +331,7 @@ class GuardrailPipeline:
             checks=checks,
             block_reasons=block_reasons,
             block_categories=block_categories,
-            duration_ms=(time.perf_counter() - started) * 1000.0,
+            duration_ms=duration_s * 1000.0,
         )
 
     async def aclose(self) -> None:
@@ -286,4 +346,4 @@ class GuardrailPipeline:
             try:
                 await g.aclose()
             except Exception:  # noqa: BLE001
-                log.debug("error closing guard %s", g.name, exc_info=True)
+                obs_log("guard.close_error", level="debug", guard=g.name, exc_info=True)

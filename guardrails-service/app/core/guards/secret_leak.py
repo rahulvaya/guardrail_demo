@@ -20,14 +20,12 @@ EXAMPLE
 """
 from __future__ import annotations
 
-import logging
 import re
 from typing import Any
 
 from ..base import Guard, GuardCheckResult, GuardStage
+from ..observability import obs_log
 from ..registry import register_guard
-
-log = logging.getLogger("agent.guardrails.secret_leak")
 
 # (label, regex). Built-in defaults; override or extend via config.
 DEFAULT_PATTERNS: dict[str, str] = {
@@ -57,7 +55,13 @@ class SecretLeakGuard(Guard):
             try:
                 compiled.append((str(label), re.compile(expr)))
             except re.error as exc:
-                log.warning("secret-leak: bad regex %r for %r: %s", expr, label, exc)
+                obs_log(
+                    "guard.regex_invalid",
+                    level="warning",
+                    guard="secret-leak",
+                    label=str(label),
+                    error=str(exc),
+                )
         self._patterns: list[tuple[str, re.Pattern[str]]] = compiled
 
     async def check(self, text: str, *, context: dict[str, Any] | None = None) -> GuardCheckResult:

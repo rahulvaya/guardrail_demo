@@ -49,10 +49,10 @@ Configuration (env: ``GUARD_AZURE_CONTENT_SAFETY_CONFIG`` JSON):
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Any
 
 from ..base import GuardCheckResult, GuardStage
+from ..observability import obs_log
 from ..registry import register_guard
 from ._azure_base import AzureGuardBase
 from .azure_endpoints import (
@@ -61,8 +61,6 @@ from .azure_endpoints import (
     content_safety_shield_prompt_url,
     content_safety_text_analyze_url,
 )
-
-log = logging.getLogger("agent.guardrails.azure_content_safety")
 
 DEFAULT_CATEGORIES = ["Hate", "SelfHarm", "Sexual", "Violence"]
 DEFAULT_SEVERITY_THRESHOLD = 4   # 0=safe, 2=low, 4=medium, 6=high
@@ -148,7 +146,13 @@ class AzureContentSafetyGuard(AzureGuardBase):
         payload = {"userPrompt": text, "documents": []}
         body, err = await self._post_json(url, payload, headers=headers)
         if err is not None:
-            log.warning("azure-content-safety prompt-shield error: %s", err)
+            obs_log(
+                "guard.azure.subcheck_error",
+                level="warning",
+                guard=self.name,
+                subcheck="prompt_shield",
+                error=err[:200],
+            )
             return None, {"available": False, "error": err}
 
         assert body is not None
@@ -301,7 +305,13 @@ class AzureContentSafetyGuard(AzureGuardBase):
         payload = {"text": text}
         body, err = await self._post_json(url, payload, headers=headers)
         if err is not None:
-            log.warning("azure-content-safety protected-material error: %s", err)
+            obs_log(
+                "guard.azure.subcheck_error",
+                level="warning",
+                guard=self.name,
+                subcheck="protected_material",
+                error=err[:200],
+            )
             return None  # fail-soft for this sub-check; main analyze still runs
 
         assert body is not None
