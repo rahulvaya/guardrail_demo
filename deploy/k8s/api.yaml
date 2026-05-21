@@ -1,0 +1,69 @@
+# =============================================================================
+# api - public BFF (Backend For Frontend). Exposed via LoadBalancer.
+# Calls agent (internal) using AGENT_INTERNAL_TOKEN.
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: bankbuddy
+  labels:
+    app: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+        - name: api
+          image: __ACR_LOGIN_SERVER__/bankbuddy/api:__IMAGE_TAG__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: SERVICE_NAME
+              value: "api"
+            - name: AUTH_PROVIDER
+              value: "local-dev"
+            - name: AGENT_INTERNAL_URL
+              value: "http://agent.bankbuddy.svc.cluster.local:8100"
+            - name: AGENT_INTERNAL_TOKEN
+              value: "please-rotate-this-token"
+            - name: APP_JWT_SECRET
+              valueFrom: { secretKeyRef: { name: app-secrets, key: jwt-secret } }
+            # Patched to the UI's public URL by 03-deploy-app.ps1 after the
+            # UI LoadBalancer IP is assigned. "*" is just a safe placeholder
+            # so the pod starts; CORS will be locked down by the patch.
+            - name: PUBLIC_UI_ORIGIN
+              value: "*"
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: bankbuddy
+spec:
+  type: LoadBalancer
+  selector:
+    app: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000

@@ -1,0 +1,107 @@
+# =============================================================================
+# Guardrails service - Kubernetes manifest.
+#
+# Placeholders substituted by 01-deploy-guardrails.ps1:
+#   __ACR_LOGIN_SERVER__   ACR FQDN, e.g. acrbankbuddy....azurecr.io
+#   __IMAGE_TAG__          image tag, typically the git short SHA or 'latest'
+#   __UAMI_CLIENT_ID__     User-Assigned Managed Identity client id
+#   __AI_SERVICES_ENDPOINT__ https://<aiservices>.cognitiveservices.azure.com/
+#
+# Secrets are NOT used for AI service auth - the pod gets a federated token
+# via Azure Workload Identity (DefaultAzureCredential picks up
+# AZURE_CLIENT_ID + projected SA token automatically).
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: guardrails
+  namespace: bankbuddy
+  annotations:
+    azure.workload.identity/client-id: "__UAMI_CLIENT_ID__"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guardrails
+  namespace: bankbuddy
+  labels:
+    app: guardrails
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: guardrails
+  template:
+    metadata:
+      labels:
+        app: guardrails
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: guardrails
+      containers:
+        - name: guardrails
+          image: __ACR_LOGIN_SERVER__/bankbuddy/guardrails:__IMAGE_TAG__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8001
+          env:
+            - name: GUARDRAILS_PORT
+              value: "8001"
+            # Policies live on a ConfigMap mount; the in-image dir is
+            # /app/app/policies (a Python package) and cannot be used
+            # as a mount point without shadowing loader.py.
+            - name: GUARDRAILS_POLICIES_DIR
+              value: "/etc/guardrails/policies"
+            - name: GUARDRAILS_DEFAULT_POLICY_ID
+              value: "bankbuddy-default"
+            - name: GUARDRAILS_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: guardrails-secrets
+                  key: internal-token
+            - name: AZURE_CONTENT_SAFETY_ENDPOINT
+              value: "__AI_SERVICES_ENDPOINT__"
+            - name: AZURE_LANGUAGE_ENDPOINT
+              value: "__AI_SERVICES_ENDPOINT__"
+          volumeMounts:
+            - name: policies
+              mountPath: /etc/guardrails/policies
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: policies
+          configMap:
+            name: guardrails-policies
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: guardrails
+  namespace: bankbuddy
+spec:
+  type: ClusterIP
+  selector:
+    app: guardrails
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001

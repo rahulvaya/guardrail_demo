@@ -1,0 +1,176 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.43.8.12551",
+      "templateHash": "10719074744692768924"
+    }
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Azure region for all resources."
+      }
+    },
+    "nameSuffix": {
+      "type": "string",
+      "defaultValue": "[uniqueString(resourceGroup().id)]",
+      "metadata": {
+        "description": "Short suffix appended to globally-unique names (ACR, AKS DNS)."
+      }
+    },
+    "aksName": {
+      "type": "string",
+      "defaultValue": "aks-bankbuddy",
+      "metadata": {
+        "description": "AKS cluster name."
+      }
+    },
+    "acrName": {
+      "type": "string",
+      "defaultValue": "[toLower(format('acrbankbuddy{0}', parameters('nameSuffix')))]",
+      "metadata": {
+        "description": "ACR name (must be globally unique, alphanumeric, 5-50 chars)."
+      }
+    },
+    "logAnalyticsName": {
+      "type": "string",
+      "defaultValue": "log-bankbuddy",
+      "metadata": {
+        "description": "Log Analytics workspace name."
+      }
+    },
+    "nodeVmSize": {
+      "type": "string",
+      "defaultValue": "Standard_D2s_v5",
+      "metadata": {
+        "description": "Node VM size for the AKS system pool."
+      }
+    },
+    "nodeCount": {
+      "type": "int",
+      "defaultValue": 1,
+      "minValue": 1,
+      "maxValue": 5,
+      "metadata": {
+        "description": "Node count for the AKS system pool."
+      }
+    },
+    "kubernetesVersion": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Kubernetes version. Leave empty to use AKS default."
+      }
+    }
+  },
+  "variables": {
+    "acrPullRoleId": "7f951dda-4ed3-4680-a7ca-43fe172d538d"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2023-09-01",
+      "name": "[parameters('logAnalyticsName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": 30
+      }
+    },
+    {
+      "type": "Microsoft.ContainerRegistry/registries",
+      "apiVersion": "2023-11-01-preview",
+      "name": "[parameters('acrName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Basic"
+      },
+      "properties": {
+        "adminUserEnabled": false,
+        "publicNetworkAccess": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.ContainerService/managedClusters",
+      "apiVersion": "2024-05-01",
+      "name": "[parameters('aksName')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "dnsPrefix": "[format('aks-bankbuddy-{0}', parameters('nameSuffix'))]",
+        "kubernetesVersion": "[if(empty(parameters('kubernetesVersion')), null(), parameters('kubernetesVersion'))]",
+        "enableRBAC": true,
+        "agentPoolProfiles": [
+          {
+            "name": "system",
+            "mode": "System",
+            "count": "[parameters('nodeCount')]",
+            "vmSize": "[parameters('nodeVmSize')]",
+            "osType": "Linux",
+            "osSKU": "AzureLinux",
+            "type": "VirtualMachineScaleSets",
+            "enableAutoScaling": false
+          }
+        ],
+        "networkProfile": {
+          "networkPlugin": "azure",
+          "networkPluginMode": "overlay",
+          "loadBalancerSku": "standard"
+        },
+        "addonProfiles": {
+          "omsagent": {
+            "enabled": true,
+            "config": {
+              "logAnalyticsWorkspaceResourceID": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]",
+      "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), resourceId('Microsoft.ContainerService/managedClusters', parameters('aksName')), 'acrpull')]",
+      "properties": {
+        "principalId": "[reference(resourceId('Microsoft.ContainerService/managedClusters', parameters('aksName')), '2024-05-01').identityProfile.kubeletidentity.objectId]",
+        "principalType": "ServicePrincipal",
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('acrPullRoleId'))]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]",
+        "[resourceId('Microsoft.ContainerService/managedClusters', parameters('aksName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "aksName": {
+      "type": "string",
+      "value": "[parameters('aksName')]"
+    },
+    "acrName": {
+      "type": "string",
+      "value": "[parameters('acrName')]"
+    },
+    "acrLoginServer": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), '2023-11-01-preview').loginServer]"
+    },
+    "resourceGroupName": {
+      "type": "string",
+      "value": "[resourceGroup().name]"
+    }
+  }
+}

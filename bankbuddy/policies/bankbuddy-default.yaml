@@ -32,6 +32,37 @@ banking_task: &banking_task >-
   scope (e.g. coding help, general trivia, medical or legal advice,
   political opinions, investment advice, or any non-banking topic).
 
+# Full PII category set used on outbound stages (output / api_output /
+# tool_input / tool_output) where Address scrubbing is desirable.
+pii_categories_full: &pii_categories
+  - USSocialSecurityNumber
+  - CreditCardNumber
+  - Email
+  - PhoneNumber
+  - Address
+  - IPAddress
+  - ABARoutingNumber
+  - SWIFTCode
+  - InternationalBankingAccountNumber
+  - USDriversLicenseNumber
+  - USIndividualTaxIdentification
+
+# Inbound subset (api_input / input). `Address` is intentionally OMITTED
+# because Azure Language flags US ZIP codes (e.g. "10001") as Address with
+# high confidence, which blocks legitimate banking queries like
+# "Find ATMs near 10001". Keep Address scrubbing only on outbound.
+pii_categories_input: &pii_categories_input
+  - USSocialSecurityNumber
+  - CreditCardNumber
+  - Email
+  - PhoneNumber
+  - IPAddress
+  - ABARoutingNumber
+  - SWIFTCode
+  - InternationalBankingAccountNumber
+  - USDriversLicenseNumber
+  - USIndividualTaxIdentification
+
 # ---------------------------------------------------------------------------
 # Six pipeline checkpoints (architecture diagram ①…⑥):
 #   ① api_input    — request entering the public chat API
@@ -59,13 +90,8 @@ api_input:
   - prompt-injection:        # G-02 heuristic backup
       enabled: false
   - azure-topic-relevance:   # G-03 Azure managed scope classifier
-      # TESTING: enabled to validate the managed path. Requires a
-      # Custom Category named `non_banking` trained in the Content
-      # Safety resource. If the resource does not support Custom
-      # Categories yet, the call returns 4xx and fail_open allows the
-      # request through -- with the local `topic-relevance` below
-      # DISABLED for this test, off-topic queries WILL leak.
-      enabled: true
+      # Disabled per request - topic enforcement turned off.
+      enabled: false
       categories:
         - non_banking
       severity_threshold: 2
@@ -74,13 +100,8 @@ api_input:
         I can only help with banking questions - accounts, cards,
         transfers, loans, ATMs.
   - topic-relevance:         # G-03 Intent / scope classifier (banking topics)
-      # Local fallback. Re-enabled because the managed
-      # `azure-topic-relevance` above will fail-open on every call
-      # until a Custom Category named `non_banking` is trained &
-      # deployed in the Content Safety resource. Keep this enabled
-      # in production -- it's the only off-topic gate that actually
-      # fires today.
-      enabled: true
+      # Disabled per request - topic enforcement turned off.
+      enabled: false
       # Shared scope anchor (same as task-adherence). Guard tokenises
       # the description, drops stopwords, uses remaining content words
       # as the in-scope vocabulary. Edit `banking_task:` at top of file
@@ -99,21 +120,8 @@ api_input:
       mode: block
       min_confidence: 0.3
       fail_open: true
-      # Strict whitelist: only flag real PII. DateTime / Person /
-      # Organization / Quantity / PersonType cause false positives on
-      # benign banking text.
-      categories: &pii_categories
-        - USSocialSecurityNumber
-        - CreditCardNumber
-        - Email
-        - PhoneNumber
-        - Address
-        - IPAddress
-        - ABARoutingNumber
-        - SWIFTCode
-        - InternationalBankingAccountNumber
-        - USDriversLicenseNumber
-        - USIndividualTaxIdentification
+      # Inbound subset - Address EXCLUDED (ZIP codes false-positive).
+      categories: *pii_categories_input
   - banned-substrings:       # G-07 Custom Blocklist (env-driven)
       enabled: false
       case_sensitive: false
@@ -213,7 +221,8 @@ input:
       mode: block
       # Lower threshold so borderline phone/SSN hits aren't dropped.
       min_confidence: 0.3
-      categories: *pii_categories
+      # Inbound subset - Address EXCLUDED (ZIP codes false-positive).
+      categories: *pii_categories_input
       # Keep app responsive if Language API is transiently unavailable.
       fail_open: true
 
@@ -229,7 +238,7 @@ input:
         I can only help with banking questions - accounts, cards,
         transfers, loans, ATMs.
   - topic-relevance:
-      enabled: true
+      enabled: false
       task_definition: *banking_task
       min_ratio: 0.05
       min_length: 5

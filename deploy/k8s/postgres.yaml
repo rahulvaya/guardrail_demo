@@ -1,0 +1,102 @@
+# =============================================================================
+# PostgreSQL - in-cluster, single replica, ClusterIP only.
+# Init script (creates 3 schemas + 3 users) is mounted from a ConfigMap.
+# Passwords come from `postgres-secrets` (managed by 03-deploy-app.ps1).
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: bankbuddy
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: bankbuddy
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: pg
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: "bankbuddy"
+            - name: POSTGRES_USER
+              value: "postgres"
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-secrets, key: postgres-password } }
+            - name: APP_DB_USER
+              value: "app_user"
+            - name: APP_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-secrets, key: app-password } }
+            - name: AGENT_DB_USER
+              value: "agent_user"
+            - name: AGENT_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-secrets, key: agent-password } }
+            - name: BANK_DB_USER
+              value: "bank_user"
+            - name: BANK_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-secrets, key: bank-password } }
+            - name: PGDATA
+              value: "/var/lib/postgresql/data/pgdata"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "bankbuddy"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "bankbuddy"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+        - name: init
+          configMap:
+            name: postgres-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: bankbuddy
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+    - name: pg
+      port: 5432
+      targetPort: 5432

@@ -1,0 +1,107 @@
+# =============================================================================
+# Agent service - Kubernetes manifest.
+#
+# Placeholders substituted by 02-deploy-agent.ps1:
+#   __ACR_LOGIN_SERVER__       ACR FQDN
+#   __IMAGE_TAG__              image tag
+#   __UAMI_CLIENT_ID__         UAMI client id (workload identity)
+#   __AZURE_OPENAI_ENDPOINT__  https://<aiservices>.openai.azure.com/
+#   __OPENAI_DEPLOYMENT__      deployment name, e.g. gpt-4o-mini
+#
+# Auth to Azure OpenAI is keyless: bankbuddy/services/agent app uses
+# LiteLLM + DefaultAzureCredential when LLM_PROVIDER=azure and no
+# AZURE_OPENAI_AAD_TOKEN is set.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent
+  namespace: bankbuddy
+  annotations:
+    azure.workload.identity/client-id: "__UAMI_CLIENT_ID__"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+  namespace: bankbuddy
+  labels:
+    app: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent
+  template:
+    metadata:
+      labels:
+        app: agent
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: agent
+      # Don't auto-inject service-discovery env vars (e.g. POSTGRES_PORT=tcp://...)
+      # that collide with pydantic Settings field names.
+      enableServiceLinks: false
+      containers:
+        - name: agent
+          image: __ACR_LOGIN_SERVER__/bankbuddy/agent:__IMAGE_TAG__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8100
+          env:
+            - name: AGENT_PORT
+              value: "8100"
+            - name: GUARDRAILS_URL
+              value: "http://guardrails.bankbuddy.svc.cluster.local:8001"
+            - name: GUARDRAILS_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: guardrails-secrets
+                  key: internal-token
+            # --- LLM (Azure OpenAI via LiteLLM, keyless) ---
+            - name: LLM_PROVIDER
+              value: "azure"
+            - name: LLM_MODEL
+              value: "azure/__OPENAI_DEPLOYMENT__"
+            - name: AZURE_OPENAI_ENDPOINT
+              value: "__AZURE_OPENAI_ENDPOINT__"
+            - name: AZURE_API_BASE
+              value: "__AZURE_OPENAI_ENDPOINT__"
+            - name: AZURE_API_VERSION
+              value: "2024-06-01"
+            - name: AZURE_OPENAI_DEPLOYMENT
+              value: "__OPENAI_DEPLOYMENT__"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent
+  namespace: bankbuddy
+spec:
+  type: ClusterIP
+  selector:
+    app: agent
+  ports:
+    - name: http
+      port: 8100
+      targetPort: 8100

@@ -1,0 +1,65 @@
+# =============================================================================
+# ui - FastAPI serving the built React SPA. Exposed via LoadBalancer.
+# Browser fetches /config at runtime to discover the API base URL.
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  namespace: bankbuddy
+  labels:
+    app: ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ui
+  template:
+    metadata:
+      labels:
+        app: ui
+    spec:
+      containers:
+        - name: ui
+          image: __ACR_LOGIN_SERVER__/bankbuddy/ui:__IMAGE_TAG__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SERVICE_NAME
+              value: "ui"
+            - name: AUTH_PROVIDER
+              value: "local-dev"
+            # In-cluster URL the UI's reverse-proxy forwards /api/* to.
+            - name: API_INTERNAL_URL
+              value: "http://api.bankbuddy.svc.cluster.local:80"
+            # Browser URL the React app uses. Same-origin /api avoids
+            # cross-site cookie problems with the session cookie.
+            - name: PUBLIC_API_BASE_URL
+              value: "/api"
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "50m",  memory: "128Mi" }
+            limits:   { cpu: "300m", memory: "384Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  namespace: bankbuddy
+spec:
+  type: LoadBalancer
+  selector:
+    app: ui
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080

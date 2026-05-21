@@ -1,0 +1,65 @@
+# =============================================================================
+# mock-bank - stub core-banking REST API. Internal ClusterIP only.
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-bank
+  namespace: bankbuddy
+  labels:
+    app: mock-bank
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-bank
+  template:
+    metadata:
+      labels:
+        app: mock-bank
+    spec:
+      containers:
+        - name: mock-bank
+          image: __ACR_LOGIN_SERVER__/bankbuddy/mock-bank:__IMAGE_TAG__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8200
+          env:
+            - name: SERVICE_NAME
+              value: "mock-bank"
+            - name: POSTGRES_HOST
+              value: "postgres"
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_DB
+              value: "bankbuddy"
+            - name: BANK_DB_USER
+              value: "bank_user"
+            - name: BANK_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-secrets, key: bank-password } }
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "50m",  memory: "128Mi" }
+            limits:   { cpu: "300m", memory: "384Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-bank
+  namespace: bankbuddy
+spec:
+  type: ClusterIP
+  selector:
+    app: mock-bank
+  ports:
+    - name: http
+      port: 8200
+      targetPort: 8200

@@ -1,0 +1,26 @@
+# =============================================================================
+# Dev-only override: publishes the internal services to the host so a developer
+# can hit their Swagger UIs from a browser. NEVER use in production.
+#
+# Usage from the bankbuddy/ directory:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Override host ports via .env if 8001/8100/8200 are taken:
+#   GUARDRAILS_HOST_PORT=18001
+#   AGENT_HOST_PORT=18100
+#   MOCK_BANK_HOST_PORT=18200
+# =============================================================================
+
+services:
+
+  guardrails:
+    ports:
+      - "${GUARDRAILS_HOST_PORT:-8001}:8001"
+
+  agent:
+    ports:
+      - "${AGENT_HOST_PORT:-8100}:8100"
+
+  mock-bank:
+    ports:
+      - "${MOCK_BANK_HOST_PORT:-8200}:8200"

@@ -1,0 +1,4 @@
+# State + secrets written by deploy scripts. Do not commit.
+.deploy-state.json
+.app-state.json
+.guardrails-token
