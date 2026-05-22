@@ -37,6 +37,8 @@ spec:
               value: "please-rotate-this-token"
             - name: APP_JWT_SECRET
               valueFrom: { secretKeyRef: { name: app-secrets, key: jwt-secret } }
+            - name: APP_JWT_TTL_SECONDS
+              value: "28800"
             # Patched to the UI's public URL by 03-deploy-app.ps1 after the
             # UI LoadBalancer IP is assigned. "*" is just a safe placeholder
             # so the pod starts; CORS will be locked down by the patch.

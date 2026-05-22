@@ -12,7 +12,9 @@ from . import (
     output_pii_redact,        # noqa: F401
     pii_detect,               # noqa: F401
     prompt_injection,         # noqa: F401
+    schema_enforcement,       # noqa: F401  (JSON Schema validation of tool calls)
     secret_leak,              # noqa: F401
+    sql_injection,            # noqa: F401  (SQL injection pattern guard)
     task_adherence,           # noqa: F401  (runtime task-scope enforcement)
     token_limit,              # noqa: F401
     topic_relevance,          # noqa: F401  (custom-guard reference impl)

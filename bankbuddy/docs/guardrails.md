@@ -72,6 +72,8 @@ break user flow.
 | `groundedness`        | OUTPUT | **off** | Score reply vs. `context["sources"]`. BLOCK / SANITIZE unsupported claims     | `engine`, `block_threshold`, `warn_threshold`, `require_sources` |
 | `task-adherence`      | OUTPUT | **off** | Keep reply inside the declared task scope (runtime gap-filler for Foundry eval) | `engine`, `in_scope_keywords`, `out_of_scope_keywords`, `block_threshold` |
 | `bias-detect`         | OUTPUT | **off** | Flag stereotype / demographic-skew patterns Hate/Unfair does not cover        | `engine`, `patterns`, `severity_map`                   |
+| `sql-injection`       | API_INPUT / INPUT / TOOL_INPUT | on | BLOCK on SQL-injection patterns: comment markers (`--`, `/* */`), stacked DML/DDL, `OR 1=1` tautologies, `SLEEP(`, `WAITFOR DELAY`, `xp_cmdshell`. Pattern-based, not a parser. | `patterns`, `extra_patterns`, `ignore_fields`, `block_message` |
+| `schema-enforcement`  | TOOL_INPUT / TOOL_OUTPUT | on (allow_unknown_tools) | Per-tool JSON Schema validation of `{tool, arguments}` payloads and tool response payloads. Blocks shape drift, unknown fields, and injection in typed fields. | `schemas` (dict[tool → `{input, output}`]), `strict`, `allow_unknown_tools`, `fail_open` |
 
 ---
 

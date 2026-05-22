@@ -28,6 +28,8 @@ metadata:
     app: guardrails
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: guardrails
@@ -61,7 +63,7 @@ spec:
                   name: guardrails-secrets
                   key: internal-token
             - name: AZURE_CONTENT_SAFETY_ENDPOINT
-              value: "__AI_SERVICES_ENDPOINT__"
+              value: "__CONTENT_SAFETY_ENDPOINT__"
             - name: AZURE_LANGUAGE_ENDPOINT
               value: "__AI_SERVICES_ENDPOINT__"
           volumeMounts:
@@ -82,7 +84,7 @@ spec:
             periodSeconds: 20
           resources:
             requests:
-              cpu: "100m"
+              cpu: "25m"
               memory: "256Mi"
             limits:
               cpu: "500m"

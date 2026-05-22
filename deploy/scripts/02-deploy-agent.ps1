@@ -49,7 +49,8 @@ $rendered = Get-Content $manifest -Raw
 $rendered = $rendered.Replace('__ACR_LOGIN_SERVER__', $state.acrLoginServer)
 $rendered = $rendered.Replace('__IMAGE_TAG__', $ImageTag)
 $rendered = $rendered.Replace('__UAMI_CLIENT_ID__', $state.workloadIdentityClientId)
-$rendered = $rendered.Replace('__AZURE_OPENAI_ENDPOINT__', $state.aiServicesOpenAiEndpoint)
+$rendered = $rendered.Replace('__AZURE_OPENAI_ENDPOINT__', $state.aiServicesUnifiedEndpoint)
+$rendered = $rendered.Replace('__FOUNDRY_PROJECT_ENDPOINT__', $state.foundryProjectEndpoint)
 $rendered = $rendered.Replace('__OPENAI_DEPLOYMENT__', $state.openAiDeploymentName)
 
 $tmp = New-TemporaryFile

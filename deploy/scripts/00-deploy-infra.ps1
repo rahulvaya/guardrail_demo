@@ -71,6 +71,11 @@ $state = [ordered]@{
     aiServicesName          = $outputs.aiServicesName.value
     aiServicesEndpoint      = $outputs.aiServicesEndpoint.value
     aiServicesOpenAiEndpoint= $outputs.aiServicesOpenAiEndpoint.value
+    aiServicesUnifiedEndpoint = $outputs.aiServicesUnifiedEndpoint.value
+    contentSafetyName       = $outputs.contentSafetyName.value
+    contentSafetyEndpoint   = $outputs.contentSafetyEndpoint.value
+    foundryProjectName      = $outputs.foundryProjectName.value
+    foundryProjectEndpoint  = $outputs.foundryProjectEndpoint.value
     openAiDeploymentName    = $outputs.openAiDeploymentName.value
 }
 $state | ConvertTo-Json -Depth 5 | Set-Content -Path $stateFile -Encoding UTF8

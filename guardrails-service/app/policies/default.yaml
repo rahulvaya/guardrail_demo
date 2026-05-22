@@ -59,6 +59,13 @@ description: Default domain-neutral policy. Safety + privacy + secret leak.
 #                                   needs context.sources [+ .query for QnA])
 #                                groundedness           (local overlap)
 #   G-09  Bias Detection         bias-detect            (lexicon engine)
+#   G-10  SQL Injection          sql-injection          (pattern guard for
+#                                   UNION/DROP/comment/stacked-statement
+#                                   probes; runs at api_input + tool_input)
+#   G-11  Schema Enforcement     schema-enforcement     (per-tool JSON Schema
+#                                   validation of tool_input arguments and
+#                                   tool_output payloads; blocks shape drift,
+#                                   unknown fields, injection in typed fields)
 #
 # Additional registered guards (not tied to a G-id but available in any
 # stage):
@@ -166,6 +173,14 @@ api_input:
       enabled: false
   - task-adherence:          # local heuristic; output-side
       enabled: false
+  # G-10 SQL Injection — defense in depth at the public entrypoint.
+  - sql-injection:
+      enabled: true
+  # G-11 Schema Enforcement — listed for completeness; arguments shape is
+  # only meaningful at tool_input. Off at api_input.
+  - schema-enforcement:
+      enabled: false
+      allow_unknown_tools: true
 
 # ---------------------------------------------------------------------------
 # ④ TOOL_INPUT  — planned tool call before execution. Validates the tool
@@ -227,6 +242,27 @@ tool_input:
       enabled: false
   - task-adherence:          # output-only
       enabled: false
+  # G-10 SQL Injection — primary checkpoint: scans synthesized tool args
+  # before any DB-backed tool call leaves the agent.
+  - sql-injection:
+      enabled: true
+  # G-11 Schema Enforcement — validates `{tool, arguments}` payload
+  # against per-tool JSON Schemas. Defaults to allow_unknown_tools=true
+  # so the baseline policy is non-breaking; declare `schemas:` per tool
+  # and set allow_unknown_tools=false to lock the surface down.
+  - schema-enforcement:
+      enabled: true
+      strict: true
+      allow_unknown_tools: true
+      # schemas:
+      #   get_transactions:
+      #     input:
+      #       type: object
+      #       additionalProperties: false
+      #       required: [account_id]
+      #       properties:
+      #         account_id: { type: string, pattern: "^[A-Za-z0-9_-]{1,32}$" }
+      #         limit:      { type: integer, minimum: 1, maximum: 100 }
 
 # ---------------------------------------------------------------------------
 # ⑥ API_OUTPUT  — last hop before the response leaves the public API.
@@ -297,6 +333,14 @@ api_output:
       require_sources: false
   - task-adherence:          # local heuristic
       enabled: false
+  # G-10 SQL Injection — defense in depth on outbound replies; off by
+  # default because legitimate assistant text may discuss SQL.
+  - sql-injection:
+      enabled: false
+  # G-11 Schema Enforcement — output-shape only applies to tool payloads.
+  - schema-enforcement:
+      enabled: false
+      allow_unknown_tools: true
 
 # ---------------------------------------------------------------------------
 # All registered guards are listed in EVERY stage below so operators can
@@ -307,8 +351,8 @@ api_output:
 #   azure-content-safety, azure-groundedness, azure-pii-detection,
 #   azure-task-adherence, banned-substrings, bias-detect,
 #   competitor-mentions, groundedness, output-pii-redact, pii-detect,
-#   prompt-injection, secret-leak, task-adherence, token-limit,
-#   topic-relevance, toxicity
+#   prompt-injection, schema-enforcement, secret-leak, sql-injection,
+#   task-adherence, token-limit, topic-relevance, toxicity
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -444,6 +488,15 @@ input:
   - task-adherence:
       enabled: false
 
+  # G-10 SQL Injection — block jailbreak prompts that ship raw SQL.
+  - sql-injection:
+      enabled: true
+
+  # G-11 Schema Enforcement — tool-args concept, off on user input.
+  - schema-enforcement:
+      enabled: false
+      allow_unknown_tools: true
+
 # ---------------------------------------------------------------------------
 # OUTPUT pipeline (runs on every assistant message before it leaves the agent)
 # ---------------------------------------------------------------------------
@@ -545,6 +598,15 @@ output:
   - task-adherence:
       enabled: false
 
+  # G-10 SQL Injection — usually irrelevant on natural-language replies.
+  - sql-injection:
+      enabled: false
+
+  # G-11 Schema Enforcement — tool-shape concept, off on free-text output.
+  - schema-enforcement:
+      enabled: false
+      allow_unknown_tools: true
+
 # ---------------------------------------------------------------------------
 # TOOL_OUTPUT pipeline (runs on EVERY tool result before it is fed back to
 # the LLM as a `role: "tool"` message). Defends against:
@@ -618,3 +680,15 @@ tool_output:
 
   - task-adherence:
       enabled: false
+
+  # G-10 SQL Injection — defense in depth: catch SQL fragments in tool
+  # responses that could later be reflected back into the LLM context.
+  - sql-injection:
+      enabled: false
+
+  # G-11 Schema Enforcement — validates the tool's response payload
+  # against the declared `output:` schema for the calling tool.
+  - schema-enforcement:
+      enabled: true
+      strict: false              # log shape drift, do not block by default
+      allow_unknown_tools: true

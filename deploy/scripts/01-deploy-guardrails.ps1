@@ -60,6 +60,7 @@ $rendered = $rendered.Replace('__ACR_LOGIN_SERVER__', $state.acrLoginServer)
 $rendered = $rendered.Replace('__IMAGE_TAG__', $ImageTag)
 $rendered = $rendered.Replace('__UAMI_CLIENT_ID__', $state.workloadIdentityClientId)
 $rendered = $rendered.Replace('__AI_SERVICES_ENDPOINT__', $state.aiServicesEndpoint)
+$rendered = $rendered.Replace('__CONTENT_SAFETY_ENDPOINT__', $state.contentSafetyEndpoint)
 
 $tmp = New-TemporaryFile
 try {

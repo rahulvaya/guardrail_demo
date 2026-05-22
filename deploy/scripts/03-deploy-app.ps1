@@ -12,7 +12,11 @@
 
 [CmdletBinding()]
 param(
-    [string] $ImageTag = (Get-Date -Format 'yyyyMMddHHmmss')
+    [string] $ImageTag = (Get-Date -Format 'yyyyMMddHHmmss'),
+    # Optional public DNS hostname (e.g. bankbuddy-demo.eastus.cloudapp.azure.com)
+    # If set, the API CORS allow-list will include http://<hostname> in addition
+    # to the UI LoadBalancer IP origin.
+    [string] $PublicHostname = $env:BANKBUDDY_PUBLIC_HOSTNAME
 )
 
 $ErrorActionPreference = 'Stop'
@@ -158,11 +162,18 @@ $uiUrl  = "http://$uiIp"
 # wait for the rollouts triggered by `kubectl set env`.
 # ---------------------------------------------------------------------------
 Write-Host "==> Patching api PUBLIC_UI_ORIGIN=$uiUrl" -ForegroundColor Cyan
-kubectl -n bankbuddy set env deployment/api PUBLIC_UI_ORIGIN="$uiUrl" | Out-Host
+$uiOrigins = $uiUrl
+if ($PublicHostname) {
+    $uiOrigins = "$uiUrl,http://$PublicHostname,https://$PublicHostname"
+    Write-Host "    (also allowing http(s)://$PublicHostname)" -ForegroundColor DarkGray
+}
+kubectl -n bankbuddy set env deployment/api PUBLIC_UI_ORIGIN="$uiOrigins" | Out-Host
 kubectl -n bankbuddy rollout status deployment/api --timeout=180s | Out-Host
 
-Write-Host "==> Patching ui PUBLIC_API_BASE_URL=$apiUrl" -ForegroundColor Cyan
-kubectl -n bankbuddy set env deployment/ui PUBLIC_API_BASE_URL="$apiUrl" | Out-Host
+# Same-origin: the React app calls /api/* which the UI server reverse-proxies
+# to API_INTERNAL_URL in-cluster. This keeps the session cookie SameSite=Lax-safe.
+Write-Host "==> Patching ui PUBLIC_API_BASE_URL=/api (same-origin)" -ForegroundColor Cyan
+kubectl -n bankbuddy set env deployment/ui PUBLIC_API_BASE_URL="/api" | Out-Host
 kubectl -n bankbuddy rollout status deployment/ui --timeout=180s | Out-Host
 
 # ---------------------------------------------------------------------------

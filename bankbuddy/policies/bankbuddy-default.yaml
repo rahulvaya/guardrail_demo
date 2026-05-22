@@ -127,6 +127,11 @@ api_input:
       case_sensitive: false
       allow_overrides: true
       phrases: ${BANNED_PHRASES_JSON:[]}
+  - sql-injection:           # G-10 SQL injection probes on raw user input
+      enabled: true
+  - schema-enforcement:      # G-11 tool-shape guard; off at api_input
+      enabled: false
+      allow_unknown_tools: true
 
 # ---------------------------------------------------------------------------
 # ④ TOOL_INPUT — planned tool call before execution. Validates the tool
@@ -147,6 +152,37 @@ tool_input:
       mode: sanitize
   - secret-leak:             # G-05 Sensitive Data Filter
       enabled: false
+  # G-10 SQL injection in synthesised tool args (account_id, query, etc.)
+  - sql-injection:
+      enabled: true
+  # G-11 Per-tool JSON Schema enforcement on `{tool, arguments}`. Defaults
+  # to allow_unknown_tools=true so the baseline policy is non-breaking;
+  # declare `schemas:` per tool and flip allow_unknown_tools=false to
+  # lock the surface down. Example schemas for the BankBuddy tools are
+  # commented out below.
+  - schema-enforcement:
+      enabled: true
+      strict: true
+      allow_unknown_tools: true
+      # schemas:
+      #   get_transactions:
+      #     input:
+      #       type: object
+      #       additionalProperties: false
+      #       required: [account_id]
+      #       properties:
+      #         account_id: { type: string, pattern: "^[A-Za-z0-9_-]{1,32}$" }
+      #         limit:      { type: integer, minimum: 1, maximum: 100 }
+      #   transfer_funds:
+      #     input:
+      #       type: object
+      #       additionalProperties: false
+      #       required: [from_account, to_account, amount]
+      #       properties:
+      #         from_account: { type: string, pattern: "^[A-Za-z0-9_-]{1,32}$" }
+      #         to_account:   { type: string, pattern: "^[A-Za-z0-9_-]{1,32}$" }
+      #         amount:       { type: number, minimum: 0.01, maximum: 1000000 }
+      #         memo:         { type: string, maxLength: 200 }
 
 # ---------------------------------------------------------------------------
 # ⑥ API_OUTPUT — last hop before the response leaves the public API.
@@ -176,6 +212,11 @@ api_output:
   - bias-detect:             # G-09 Bias Detection (reframe / block)
       enabled: false
       engine: lexicon
+  - sql-injection:           # G-10 defense in depth; off on free-text replies
+      enabled: false
+  - schema-enforcement:      # G-11 tool-shape concept; off on free-text replies
+      enabled: false
+      allow_unknown_tools: true
 
 # ---------------------------------------------------------------------------
 # ② INPUT (a.k.a. llm_input) — user message about to be sent to the LLM.
@@ -245,6 +286,14 @@ input:
       refusal_message: >-
         I can only help with banking questions - accounts, cards,
         transfers, loans, ATMs.
+
+  # G-10 SQL injection - block jailbreak prompts that ship raw SQL.
+  - sql-injection:
+      enabled: true
+  # G-11 Schema enforcement - tool-args concept, off on user input.
+  - schema-enforcement:
+      enabled: false
+      allow_unknown_tools: true
 
 # ---------------------------------------------------------------------------
 # OUTPUT pipeline (runs on every assistant message before it leaves the agent)
@@ -350,6 +399,14 @@ output:
       enabled: false
       engine: lexicon
 
+  # G-10 SQL injection - usually irrelevant on natural-language replies.
+  - sql-injection:
+      enabled: false
+  # G-11 Schema enforcement - tool-shape concept, off on free-text output.
+  - schema-enforcement:
+      enabled: false
+      allow_unknown_tools: true
+
 # ---------------------------------------------------------------------------
 # TOOL_OUTPUT pipeline (runs on EVERY tool result before it is fed back to the
 # LLM as a `role: "tool"` message). Defends against:
@@ -404,3 +461,14 @@ tool_output:
 
   - toxicity:
       enabled: false
+
+  # G-10 SQL injection - catch SQL fragments echoed by tools that could
+  # poison the LLM context if reflected back.
+  - sql-injection:
+      enabled: false
+  # G-11 Schema enforcement - validates tool response payload against the
+  # declared `output:` schema for the calling tool.
+  - schema-enforcement:
+      enabled: true
+      strict: false              # log shape drift, do not block by default
+      allow_unknown_tools: true

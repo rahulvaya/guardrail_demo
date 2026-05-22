@@ -27,8 +27,12 @@ class Settings(BaseSettings):
     app_jwt_ttl_seconds: int = Field(default=3600, alias="APP_JWT_TTL_SECONDS")
     app_jwt_algorithm: str = "HS256"
 
-    # CORS
+    # CORS - accepts a single origin or a comma-separated list
     ui_origin: str = Field(default="http://localhost:8080", alias="PUBLIC_UI_ORIGIN")
+
+    @property
+    def ui_origins(self) -> list[str]:
+        return [o.strip() for o in self.ui_origin.split(",") if o.strip()]
 
     # Agent (internal)
     agent_internal_url: str = Field(default="http://agent:8100", alias="AGENT_INTERNAL_URL")

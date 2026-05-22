@@ -2,11 +2,12 @@
 # Agent service - Kubernetes manifest.
 #
 # Placeholders substituted by 02-deploy-agent.ps1:
-#   __ACR_LOGIN_SERVER__       ACR FQDN
-#   __IMAGE_TAG__              image tag
-#   __UAMI_CLIENT_ID__         UAMI client id (workload identity)
-#   __AZURE_OPENAI_ENDPOINT__  https://<aiservices>.openai.azure.com/
-#   __OPENAI_DEPLOYMENT__      deployment name, e.g. gpt-4o-mini
+#   __ACR_LOGIN_SERVER__         ACR FQDN
+#   __IMAGE_TAG__                image tag
+#   __UAMI_CLIENT_ID__           UAMI client id (workload identity)
+#   __AZURE_OPENAI_ENDPOINT__    https://<aiservices>.services.ai.azure.com/      (Foundry v2 unified host)
+#   __FOUNDRY_PROJECT_ENDPOINT__ https://<aiservices>.services.ai.azure.com/api/projects/<project>
+#   __OPENAI_DEPLOYMENT__        deployment name, e.g. gpt-4.1-mini
 #
 # Auth to Azure OpenAI is keyless: bankbuddy/services/agent app uses
 # LiteLLM + DefaultAzureCredential when LLM_PROVIDER=azure and no
@@ -29,6 +30,8 @@ metadata:
     app: agent
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: agent
@@ -59,7 +62,7 @@ spec:
                 secretKeyRef:
                   name: guardrails-secrets
                   key: internal-token
-            # --- LLM (Azure OpenAI via LiteLLM, keyless) ---
+            # --- LLM (Azure OpenAI via Foundry v2 unified endpoint, keyless) ---
             - name: LLM_PROVIDER
               value: "azure"
             - name: LLM_MODEL
@@ -69,9 +72,14 @@ spec:
             - name: AZURE_API_BASE
               value: "__AZURE_OPENAI_ENDPOINT__"
             - name: AZURE_API_VERSION
-              value: "2024-06-01"
+              value: "2025-01-01-preview"
             - name: AZURE_OPENAI_DEPLOYMENT
               value: "__OPENAI_DEPLOYMENT__"
+            # Foundry v2 project endpoint (consumed by `azure-ai-projects` SDK
+            # for connections / evaluations / agent runs). Inference still
+            # flows through AZURE_OPENAI_ENDPOINT above.
+            - name: FOUNDRY_PROJECT_ENDPOINT
+              value: "__FOUNDRY_PROJECT_ENDPOINT__"
           readinessProbe:
             httpGet:
               path: /health
@@ -86,7 +94,7 @@ spec:
             periodSeconds: 20
           resources:
             requests:
-              cpu: "100m"
+              cpu: "25m"
               memory: "256Mi"
             limits:
               cpu: "500m"

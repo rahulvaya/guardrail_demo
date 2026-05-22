@@ -16,5 +16,10 @@ litellm>=1.50.0
 # Azure AD / Entra ID auth for Azure OpenAI (used when LLM_API_KEY is empty)
 azure-identity>=1.19.0
 
+# Azure AI Foundry v2 project SDK (project-scoped connections, eval, agents).
+# Inference still flows through LiteLLM via the unified Foundry endpoint;
+# this SDK is for project metadata and future agent-service integration.
+azure-ai-projects>=1.0.0
+
 # DB driver for LangGraph PostgresSaver
 psycopg[binary,pool]>=3.2.0

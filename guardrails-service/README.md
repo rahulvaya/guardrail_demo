@@ -725,7 +725,7 @@ only the placement the shipped [`default.yaml`](app/policies/default.yaml)
 uses; you are free to move or duplicate guards across stages.
 
 The shipped [`default.yaml`](app/policies/default.yaml) starts with a
-reference block that maps the OWASP-style G-IDs (G-01 … G-09) to the
+reference block that maps the OWASP-style G-IDs (G-01 … G-11) to the
 specific guard implementations, so you only edit toggles, not the
 catalog. Top-level YAML keys map to the `stage` values listed in
 [API contract](#api-contract): `api_input`, `input`, `tool_input`,
@@ -747,6 +747,8 @@ catalog. Top-level YAML keys map to the `stage` values listed in
 | `groundedness` | G-08 | output | Local overlap-based hallucination check against `context.sources`. |
 | `task-adherence` | G-03a | tool_input, output | Local heuristic that the reply / planned tool call stays on the configured task. |
 | `toxicity` | G-01 | output | Classifier-based toxicity score. |
+| `sql-injection` | G-10 | api_input, input, tool_input | Pattern guard for SQL-injection probes: comment markers (`--`, `/* */`), stacked DML/DDL (`; DROP`, `; SELECT`), tautologies (`OR 1=1`), time-based probes (`SLEEP(`, `WAITFOR DELAY`), and OOB exfil (`xp_cmdshell`, `LOAD_FILE`). Pattern-based, not a SQL parser. |
+| `schema-enforcement` | G-11 | tool_input, tool_output | Per-tool JSON Schema validation. Reads `context.tool_name` and the declared `schemas.<tool>.input` / `schemas.<tool>.output` from policy YAML. Blocks shape drift, hallucinated fields, missing required params, and injection payloads in typed fields. Requires `jsonschema` (already in `requirements.txt`). |
 
 #### Local guard configuration keys
 
@@ -769,6 +771,8 @@ from policy YAML or the matching `GUARD_<NAME>_CONFIG` JSON env var.
 | `bias-detect` | `engine` (`lexicon` \| `detoxify-unbiased` \| `hap` \| `llm-judge`), `patterns` (dict[category → list[regex]]), `severity_map` (dict[category → `low`\|`medium`\|`high`]), `neutral_replacement` (str), `block_message` (str), `min_length` (int, default `30`) | `patterns` REPLACES the default lexicon; `severity_map` MERGES with defaults. |
 | `groundedness` | `engine` (`overlap` \| `nli` \| `llm-judge` \| `azure`), `block_threshold` (float, default `0.45`), `warn_threshold` (float, default `0.65`), `require_sources` (bool), `min_length` (int, default `40`), `unverified_suffix` (str), `block_message` (str) | Needs `context.sources: [str, ...]` from the caller. |
 | `toxicity` | `engine` (`keyword` \| `detoxify`), `threshold` (float, default `0.7`), `words` (list[str]) | Default `words` list is intentionally minimal; replace via config. |
+| `sql-injection` | `patterns` (list[regex]) REPLACES the default catalog; `extra_patterns` (list[regex]) MERGES on top; `ignore_fields` (list[str]) suppresses matches inside named JSON keys (free-text fields like `memo`, `note`); `block_message` (str) | Default catalog covers `UNION SELECT`, `DROP/INSERT/UPDATE/DELETE`, `--` and `/* */` comments, stacked `;`, `OR 1=1` tautologies, `SLEEP(`, `WAITFOR DELAY`, `xp_cmdshell`, `LOAD_FILE`, `INTO OUTFILE`. |
+| `schema-enforcement` | `schemas` (dict[tool → `{input: <json-schema>, output: <json-schema>}`]), `strict` (bool, default `true`), `allow_unknown_tools` (bool, default `false`), `fail_open` (bool, default `false`), `block_message` (str) | Uses Draft-7 `jsonschema`. At `tool_input` the guard unwraps `{tool, arguments}` payload before validation. At `tool_output` it validates the raw JSON returned by the tool. With `allow_unknown_tools: true` tools without a declared schema fall through (recommended default while iterating). |
 
 For the four regex-based local guards above (`prompt-injection`,
 `pii-detect`, `output-pii-redact`, `secret-leak`) the pattern catalogs

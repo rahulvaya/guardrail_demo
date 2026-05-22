@@ -18,6 +18,7 @@ export default function App() {
   useEffect(() => {
     if (!config?.api_base_url) return;
     api.setBaseUrl(config.api_base_url);
+    api.setProvider(config.auth_provider);
     api.me().then(setMe).catch(() => setMe(null));
   }, [config]);
 
