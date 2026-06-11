@@ -63,6 +63,24 @@ pii_categories_input: &pii_categories_input
   - USDriversLicenseNumber
   - USIndividualTaxIdentification
 
+# Microsoft Presidio entity whitelist for the local `pii-detect` guard
+# (https://github.com/microsoft/presidio). Keeps the focus on real PII
+# and avoids the noisy NLP-only types (PERSON / DATE_TIME / NRP / LOCATION)
+# that produce false positives on benign banking text.
+presidio_entities: &presidio_entities
+  - EMAIL_ADDRESS
+  - PHONE_NUMBER
+  - CREDIT_CARD
+  - US_SSN
+  - US_BANK_NUMBER
+  - US_DRIVER_LICENSE
+  - US_ITIN
+  - US_PASSPORT
+  - IBAN_CODE
+  - IP_ADDRESS
+  - CRYPTO
+  - MEDICAL_LICENSE
+
 # ---------------------------------------------------------------------------
 # Six pipeline checkpoints (architecture diagram ①…⑥):
 #   ① api_input    — request entering the public chat API
@@ -115,13 +133,24 @@ api_input:
       refusal_message: >-
         I can only help with banking questions - accounts, cards,
         transfers, loans, ATMs.
-  - azure-pii-detection:     # G-04 PII Filter (Presidio-style block)
+  - azure-pii-detection:     # G-04 PII Filter (Azure AI Language)
       enabled: true
       mode: block
       min_confidence: 0.3
       fail_open: true
       # Inbound subset - Address EXCLUDED (ZIP codes false-positive).
       categories: *pii_categories_input
+  - pii-detect:              # G-04 PII Filter (Microsoft Presidio — local, deterministic)
+      # Runs alongside Azure PII so values that fall below Azure's
+      # confidence threshold or arrive while Language API is degraded
+      # still get blocked. Presidio is the primary engine; the guard
+      # auto-falls-back to its built-in regex set if the analyzer fails.
+      enabled: true
+      engine: presidio
+      mode: block
+      min_score: 0.3
+      spacy_model: en_core_web_sm
+      entities: *presidio_entities
   - banned-substrings:       # G-07 Custom Blocklist (env-driven)
       enabled: false
       case_sensitive: false
@@ -147,9 +176,13 @@ tool_input:
       mode: sanitize
       min_confidence: 0.5
       categories: *pii_categories
-  - pii-detect:              # local regex fallback
-      enabled: false
+  - pii-detect:              # G-04 Presidio redaction (deterministic backup)
+      enabled: true
+      engine: presidio
       mode: sanitize
+      min_score: 0.4
+      spacy_model: en_core_web_sm
+      entities: *presidio_entities
   - secret-leak:             # G-05 Sensitive Data Filter
       enabled: false
   # G-10 SQL injection in synthesised tool args (account_id, query, etc.)
@@ -199,9 +232,13 @@ api_output:
       mode: sanitize
       min_confidence: 0.3
       categories: *pii_categories
-  - pii-detect:
-      enabled: false
+  - pii-detect:              # G-04 Presidio last-line PII sweep
+      enabled: true
+      engine: presidio
       mode: sanitize
+      min_score: 0.4
+      spacy_model: en_core_web_sm
+      entities: *presidio_entities
   - secret-leak:             # G-05 Last-line credential check
       enabled: false
   - banned-substrings:       # G-07 custom blocklist
@@ -238,13 +275,19 @@ input:
   - prompt-injection:
       enabled: false
 
-  # Local regex PII detector (no cloud call). Catches SSN, credit-card,
-  # email, US phone, IPv4, IBAN deterministically. Runs alongside the
-  # Azure guard so values that fall below Azure's confidence threshold
-  # (e.g. 10 raw digits like "1234567890") still get masked.
+  # Microsoft Presidio PII detector (no cloud call). Catches SSN,
+  # credit-card, email, phone, IPv4, IBAN, etc. deterministically.
+  # Runs alongside the Azure guard so values below Azure's confidence
+  # threshold (or arriving while the Language API is degraded) still
+  # get blocked. Falls back to its own regex set if presidio-analyzer
+  # is unavailable.
   - pii-detect:
-      enabled: false
+      enabled: true
+      engine: presidio
       mode: block
+      min_score: 0.3
+      spacy_model: en_core_web_sm
+      entities: *presidio_entities
 
   # Azure AI Content Safety (hate, self-harm, sexual, violence, prompt-shield).
   # severity_threshold=2 blocks any harm category at "low" or above
@@ -333,10 +376,15 @@ output:
       api_version: "2024-09-15-preview"
       fail_open: true
 
-  # Local regex PII fallback on assistant replies (SSN/card/phone/email).
+  # Microsoft Presidio PII detector on assistant replies. Sanitizes
+  # SSN / card / phone / email / IBAN / IP before they reach the user.
   - pii-detect:
-      enabled: false
+      enabled: true
+      engine: presidio
       mode: sanitize
+      min_score: 0.4
+      spacy_model: en_core_web_sm
+      entities: *presidio_entities
 
   # Mask PII in the assistant response before it leaves the agent.
   - output-pii-redact:
@@ -432,8 +480,12 @@ tool_output:
       enabled: false
 
   - pii-detect:
-      enabled: false
+      enabled: true
+      engine: presidio
       mode: sanitize
+      min_score: 0.4
+      spacy_model: en_core_web_sm
+      entities: *presidio_entities
 
   - azure-content-safety:
       enabled: true

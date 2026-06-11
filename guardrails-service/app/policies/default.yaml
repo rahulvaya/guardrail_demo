@@ -44,7 +44,9 @@ description: Default domain-neutral policy. Safety + privacy + secret leak.
 #                                task-adherence         (local heuristic)
 #   G-04  PII Filtering          azure-pii-detection    (Azure AI Language;
 #                                   mode: block | sanitize)
-#                                pii-detect             (local regex)
+#                                pii-detect             (Microsoft Presidio
+#                                   https://github.com/microsoft/presidio;
+#                                   regex fallback when offline)
 #                                output-pii-redact      (sanitize on output)
 #   G-05  Sensitive Data Filter  secret-leak            (API keys, JWTs,
 #                                   connection strings, private keys)
@@ -149,9 +151,29 @@ api_input:
   # ---- enabled: false so this stage can serve as a copy-paste template.
   # ---- Most of these are output-side checks; flip on only if your
   # ---- threat model requires them on the public-API entry point.
-  - pii-detect:              # local regex PII fallback (input-safe)
-      enabled: false
-      mode: block
+  - pii-detect:              # G-04 PII Filtering — Microsoft Presidio (https://github.com/microsoft/presidio)
+      enabled: true
+      engine: presidio        # presidio | regex (regex is the offline fallback)
+      mode: block             # block | sanitize
+      # Presidio scores entities 0.0 – 1.0. 0.3 catches pattern-only SSNs
+      # without context words; raise to 0.5 if you see false positives.
+      min_score: 0.3
+      spacy_model: en_core_web_sm
+      # Whitelist Presidio entities so we focus on real PII and avoid the
+      # noisy NLP-only types (PERSON / DATE_TIME / NRP / LOCATION).
+      entities:
+        - EMAIL_ADDRESS
+        - PHONE_NUMBER
+        - CREDIT_CARD
+        - US_SSN
+        - US_BANK_NUMBER
+        - US_DRIVER_LICENSE
+        - US_ITIN
+        - US_PASSPORT
+        - IBAN_CODE
+        - IP_ADDRESS
+        - CRYPTO
+        - MEDICAL_LICENSE
   - output-pii-redact:       # output-only by design; off on input
       enabled: false
   - secret-leak:             # G-05; flip on to reject leaked creds in prompts

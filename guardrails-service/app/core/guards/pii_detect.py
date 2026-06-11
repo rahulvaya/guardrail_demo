@@ -1,13 +1,29 @@
 """pii-detect: flag PII in INPUT.
 
-Default: regex-based detection (no extra dependencies). Optional: if
-`presidio-analyzer` is installed and `engine="presidio"` is set in the
-guard config, defer to Presidio for higher recall.
+Default engine: **Microsoft Presidio** (https://github.com/microsoft/presidio).
+Falls back to a regex engine when ``presidio-analyzer`` is not installed
+or fails to initialize, so the guard never disappears from the pipeline.
 
 By default this guard SANITIZES (masks the entity) rather than blocking,
 so users can still ask "what's my balance?" even if their question
 mentions an email address. Switch to BLOCK by setting
-`mode: "block"` in `GUARD_PII_DETECT_CONFIG`.
+``mode: "block"`` in policy YAML or ``GUARD_PII_DETECT_CONFIG``.
+
+Configuration keys (policy YAML or ``GUARD_PII_DETECT_CONFIG`` JSON):
+    engine          "presidio" (default) | "regex"
+    mode            "sanitize" (default) | "block"
+    language        Presidio language code (default: "en")
+    min_score       Float in [0, 1]; entities below this are ignored
+                    when engine == "presidio" (default: 0.4)
+    entities        Optional list[str] to whitelist Presidio entity types
+                    (e.g. ["EMAIL_ADDRESS", "CREDIT_CARD"]). Empty / unset
+                    => analyze all built-in entities.
+    spacy_model     spaCy model name for the Presidio NLP engine
+                    (default: "en_core_web_sm"). Falls back to whichever
+                    model is actually installed on the host.
+    patterns        dict[label -> regex | {regex, mask}] for regex engine.
+                    Overrides ``DEFAULT_PATTERNS`` when present.
+    extra_patterns  dict merged on top of the active regex pattern set.
 """
 from __future__ import annotations
 
@@ -18,10 +34,7 @@ from ..base import Guard, GuardCheckResult, GuardStage
 from ..observability import obs_log
 from ..registry import register_guard
 
-# Conservative regex set. Each entry: label -> {regex, mask}.
-# Configurable via policy YAML: override the whole set with ``patterns``
-# or merge extras with ``extra_patterns``. Each value is either a regex
-# string (mask defaults to ``<LABEL>``) or a {regex, mask} mapping.
+# Conservative regex set used when Presidio is unavailable or disabled.
 DEFAULT_PATTERNS: dict[str, dict[str, str]] = {
     "email":       {"regex": r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b", "mask": "<EMAIL>"},
     "ssn":         {"regex": r"\b\d{3}-\d{2}-\d{4}\b", "mask": "<SSN>"},
@@ -63,32 +76,67 @@ def _compile_patterns(spec: dict[str, Any]) -> list[tuple[str, re.Pattern[str], 
 class PiiDetectGuard(Guard):
     name = "pii-detect"
     stage = GuardStage.INPUT
-    description = "Detect PII (email/SSN/card/phone/IP/IBAN) and either mask or block."
+    description = "Detect PII via Microsoft Presidio (regex fallback) and mask or block."
 
     def __init__(self, **config: Any) -> None:
         super().__init__(**config)
         self.mode: str = str(config.get("mode", "sanitize")).lower()  # sanitize | block
-        self.engine: str = str(config.get("engine", "regex")).lower()  # regex | presidio
+        self.engine: str = str(config.get("engine", "presidio")).lower()  # presidio | regex
+        self.language: str = str(config.get("language", "en"))
+        self.min_score: float = float(config.get("min_score", 0.4))
+        entities = config.get("entities") or []
+        self.entities: list[str] = [str(e) for e in entities] if isinstance(entities, list) else []
+        self.spacy_model: str = str(config.get("spacy_model", "en_core_web_sm"))
+
         raw: dict[str, Any] = dict(config.get("patterns") or DEFAULT_PATTERNS)
         extra = config.get("extra_patterns") or {}
         if isinstance(extra, dict):
             raw.update(extra)
         self._patterns: list[tuple[str, re.Pattern[str], str]] = _compile_patterns(raw)
-        self._presidio = None
+
+        self._presidio: Any = None
         if self.engine == "presidio":
             try:
-                from presidio_analyzer import AnalyzerEngine  # type: ignore
-                self._presidio = AnalyzerEngine()
-            except Exception:  # noqa: BLE001
+                self._presidio = self._build_presidio_engine()
+                obs_log(
+                    "guard.engine_ready",
+                    guard="pii-detect",
+                    engine="presidio",
+                    language=self.language,
+                    spacy_model=self.spacy_model,
+                    min_score=self.min_score,
+                    entities=self.entities or "all",
+                )
+            except Exception as exc:  # noqa: BLE001
                 obs_log(
                     "guard.engine_fallback",
                     level="warning",
                     guard="pii-detect",
                     requested_engine="presidio",
                     fallback_engine="regex",
-                    reason="presidio_analyzer not available",
+                    reason=f"{type(exc).__name__}: {exc}",
                 )
                 self.engine = "regex"
+
+    def _build_presidio_engine(self) -> Any:
+        """Build a Presidio AnalyzerEngine bound to the configured spaCy model.
+
+        Presidio's default config asks for ``en_core_web_lg``. We bind to
+        whichever model the operator configured (default: small) so the
+        analyzer doesn't error out at startup when only that model is
+        installed.
+        """
+        from presidio_analyzer import AnalyzerEngine  # type: ignore
+        from presidio_analyzer.nlp_engine import NlpEngineProvider  # type: ignore
+
+        provider = NlpEngineProvider(
+            nlp_configuration={
+                "nlp_engine_name": "spacy",
+                "models": [{"lang_code": self.language, "model_name": self.spacy_model}],
+            }
+        )
+        nlp_engine = provider.create_engine()
+        return AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=[self.language])
 
     async def check(self, text: str, *, context: dict[str, Any] | None = None) -> GuardCheckResult:
         if self.engine == "presidio" and self._presidio is not None:
@@ -109,8 +157,12 @@ class PiiDetectGuard(Guard):
             return self._block(text, reasons=found, categories=[f"pii.{f.split()[0]}" for f in found])
         return self._sanitize(sanitized, reasons=found, categories=[f"pii.{f.split()[0]}" for f in found])
 
-    def _check_presidio(self, text: str) -> GuardCheckResult:  # pragma: no cover - optional path
-        results = self._presidio.analyze(text=text, language="en")  # type: ignore[union-attr]
+    def _check_presidio(self, text: str) -> GuardCheckResult:
+        kwargs: dict[str, Any] = {"text": text, "language": self.language}
+        if self.entities:
+            kwargs["entities"] = self.entities
+        results = self._presidio.analyze(**kwargs)  # type: ignore[union-attr]
+        results = [r for r in results if getattr(r, "score", 0.0) >= self.min_score]
         if not results:
             return self._allow(text)
         sanitized = text

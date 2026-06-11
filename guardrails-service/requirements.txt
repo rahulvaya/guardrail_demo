@@ -15,6 +15,17 @@ PyJWT[crypto]>=2.9.0
 # Required by the copied guards (Azure AAD token acquisition fallback).
 azure-identity>=1.19.0
 
+# Microsoft Presidio (PII detection) — primary engine for `pii-detect`.
+# https://github.com/microsoft/presidio
+# `presidio-analyzer` pulls in spaCy. The default recognizer set requires
+# the `en_core_web_lg` model; we install the smaller `en_core_web_sm`
+# from the spaCy releases for a smaller image while still covering the
+# built-in entity recognizers (EMAIL_ADDRESS, PHONE_NUMBER, CREDIT_CARD,
+# US_SSN, IP_ADDRESS, IBAN_CODE, etc.).
+presidio-analyzer>=2.2.355
+spacy>=3.7,<3.8
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
+
 # Observability:
 #   * prometheus-client powers GET /metrics (histograms, counters, gauges).
 #     Without it, /metrics returns 503 and metric calls become no-ops.
