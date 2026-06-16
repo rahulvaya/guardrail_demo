@@ -90,12 +90,19 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+      # Evaluation config: EVAL_AZURE_OPENAI_*, EVAL_AI_PROJECT_* etc.
+      # File lives in guardrails-service/ so it travels with the service repo.
+      - path: ../guardrails-service/eval.env
+        required: false  # graceful no-op when file is absent
     environment:
       SERVICE_NAME: guardrails
       # Same per-host AAD tokens consumed today by the agent. They move
       # here so only this container needs Azure credentials.
       AZURE_CONTENT_SAFETY_AAD_TOKEN: ${AZURE_CONTENT_SAFETY_AAD_TOKEN:-}
       AZURE_LANGUAGE_AAD_TOKEN: ${AZURE_LANGUAGE_AAD_TOKEN:-${AZURE_CONTENT_SAFETY_AAD_TOKEN:-}}
+      # Forward EVAL_AZURE_AAD_TOKEN when set on the host (e.g. by
+      # refresh-aad-token.ps1) so it overrides the eval.env placeholder.
+      EVAL_AZURE_AAD_TOKEN: ${EVAL_AZURE_AAD_TOKEN:-}
       # Load both the service-bundled `default.yaml` AND BankBuddy's own
       # `bankbuddy-default.yaml` (mounted below). The guardrails-service
       # itself is domain-neutral; banking policy lives with the consumer.

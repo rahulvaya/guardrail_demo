@@ -28,6 +28,9 @@
 param(
     [string]$Tenant = '16b3c013-d300-468d-ac64-7eda0820b6d3',
     [string]$Resource = 'https://cognitiveservices.azure.com',
+    # Separate audience for the azure-ai-evaluation SDK (safety + quality evaluators).
+    # The SDK internally requests tokens with this scope via get_token_provider().
+    [string]$EvalResource = 'https://ai.azure.com',
     [switch]$NoRecreate
 )
 
@@ -61,6 +64,19 @@ $env:AZURE_LANGUAGE_AAD_TOKEN = $token
 Write-Host "AZURE_OPENAI_AAD_TOKEN set (length=$($token.Length))." -ForegroundColor Green
 Write-Host "AZURE_CONTENT_SAFETY_AAD_TOKEN set (length=$($token.Length))." -ForegroundColor Green
 Write-Host "AZURE_LANGUAGE_AAD_TOKEN set (length=$($token.Length))." -ForegroundColor Green
+
+# Fetch a second token scoped to ai.azure.com for the azure-ai-evaluation SDK.
+# The SDK's get_token_provider calls credential.get_token("https://ai.azure.com/.default"),
+# so passing a cognitiveservices.azure.com token would fail with audience mismatch.
+Write-Host "Acquiring evaluation token for $EvalResource ..." -ForegroundColor Cyan
+$evalTokenJson = az account get-access-token --resource $EvalResource --output json
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "Could not fetch ai.azure.com token — evaluation quality/safety evaluators may fail."
+} else {
+    $evalToken = ($evalTokenJson | ConvertFrom-Json).accessToken
+    $env:EVAL_AZURE_AAD_TOKEN = $evalToken
+    Write-Host "EVAL_AZURE_AAD_TOKEN set (length=$($evalToken.Length))." -ForegroundColor Green
+}
 
 if ($NoRecreate) {
     Write-Host "Skipping container recreate (-NoRecreate)." -ForegroundColor Yellow
