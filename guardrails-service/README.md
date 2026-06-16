@@ -430,6 +430,22 @@ Inspect available policies:
 curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8001/v1/policies
 ```
 
+### 2. Guard verification report
+
+Run the built-in verifier to exercise every registered guard with
+deterministic sample inputs and generate a report you can review:
+
+```bash
+python scripts/verify_guards.py --markdown-out guard-report.md --json-out guard-report.json
+```
+
+The report lists each guard, the test case used, the decision it made,
+and whether that matched the expected outcome. Azure-backed guards are
+included too; when the local environment cannot call Azure, the report
+marks those checks as skipped instead of silently treating them as pass.
+
+Use `--strict` to make the command exit non-zero if any case fails.
+
 ### 2. Python
 
 A reference client lives at

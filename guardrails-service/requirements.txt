@@ -33,3 +33,11 @@ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1
 #     JSON logs to stdout and exposes a Prometheus scrape endpoint.
 #     Consumers forward logs into their own telemetry stack.
 prometheus-client>=0.20.0
+
+# Azure AI Evaluation SDK — powers the /v1/evaluate endpoint family.
+# Safety evaluators (violence, sexual, self-harm, hate-unfairness,
+# indirect-attack, protected-material) require an Azure AI Foundry project.
+# Quality evaluators (groundedness, coherence, fluency, relevance, similarity)
+# require an Azure OpenAI deployment.
+# NLP evaluators (BLEU, GLEU, METEOR, ROUGE) are fully local.
+azure-ai-evaluation>=1.0.0

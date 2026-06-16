@@ -6,11 +6,16 @@ is bound to the `internal` Docker network and is unreachable from the
 host - bearer auth is defense-in-depth.
 
 Endpoints:
-    GET  /healthz                 - liveness
-    GET  /readyz                  - readiness (policies loaded)
-    GET  /v1/policies             - list available policies
-    GET  /v1/policies/{id}        - inspect one policy
-    POST /v1/check                - run a stage of a policy on text
+    GET  /healthz                       - liveness
+    GET  /readyz                        - readiness (policies loaded)
+    GET  /v1/policies                   - list available policies
+    GET  /v1/policies/{id}              - inspect one policy
+    POST /v1/check                      - run a stage of a policy on text
+    GET  /v1/evaluate/evaluators        - list available evaluators (optionally filtered by stage)
+    POST /v1/evaluate                   - run evaluators on a query/response pair
+    POST /v1/evaluate/report            - same but returns a self-contained HTML report
+    POST /v1/evaluate/batch             - run evaluators on multiple pairs in one call
+    POST /v1/evaluate/batch/report      - same but returns a multi-item HTML report
 """
 from __future__ import annotations
 
@@ -41,6 +46,19 @@ from .policies.loader import (
     build_pipeline_with_overrides,
     load_policies,
     validate_request_overrides,
+)
+from .evaluation import (
+    EvaluateBatchRequest,
+    EvaluateBatchResponse,
+    EvaluateRequest,
+    EvaluateResponse,
+    EvaluatorInfo,
+    format_batch_html_report,
+    format_html_report,
+    get_eval_settings,
+    list_evaluators,
+    run_batch_evaluation,
+    run_evaluation,
 )
 from .settings import get_settings
 
@@ -348,3 +366,85 @@ async def check(req: CheckRequest) -> CheckResponse:
         guards=guards,
         request_id=request_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Evaluate
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/v1/evaluate/evaluators",
+    dependencies=[Depends(require_bearer)],
+    summary="List available evaluators",
+    description=(
+        "Return all evaluators, optionally filtered by `stage`. "
+        "The `available` flag shows whether required credentials are configured."
+    ),
+)
+def get_evaluators(
+    stage: str | None = None,
+) -> dict[str, list[EvaluatorInfo]]:
+    return {"evaluators": list_evaluators(stage, get_eval_settings())}
+
+
+@app.post(
+    "/v1/evaluate",
+    response_model=EvaluateResponse,
+    dependencies=[Depends(require_bearer)],
+    summary="Evaluate a query/response pair",
+    description=(
+        "Run Azure AI Evaluation metrics on a query/response pair at any guardrail "
+        "pipeline stage. Returns structured results with pass/fail per evaluator."
+    ),
+)
+async def evaluate(req: EvaluateRequest) -> EvaluateResponse:
+    return await run_evaluation(req, get_eval_settings())
+
+
+@app.post(
+    "/v1/evaluate/report",
+    dependencies=[Depends(require_bearer)],
+    summary="Evaluate and return an HTML report",
+    description=(
+        "Same as POST /v1/evaluate but returns a self-contained HTML page with "
+        "colour-coded results tables for easy visual inspection."
+    ),
+    response_class=__import__('fastapi.responses', fromlist=['HTMLResponse']).HTMLResponse,
+)
+async def evaluate_report(req: EvaluateRequest):
+    from fastapi.responses import HTMLResponse
+    result = await run_evaluation(req, get_eval_settings())
+    return HTMLResponse(content=format_html_report(result))
+
+
+@app.post(
+    "/v1/evaluate/batch",
+    response_model=EvaluateBatchResponse,
+    dependencies=[Depends(require_bearer)],
+    summary="Batch-evaluate multiple query/response pairs",
+    description=(
+        "Evaluate multiple query/response pairs in a single request. "
+        "All items are evaluated concurrently. "
+        "Set a top-level `evaluators` list as the default for every item, "
+        "or set per-item `evaluators` to override it. "
+        "Use `GET /v1/evaluate/evaluators` to discover evaluator names."
+    ),
+)
+async def evaluate_batch(req: EvaluateBatchRequest) -> EvaluateBatchResponse:
+    return await run_batch_evaluation(req, get_eval_settings())
+
+
+@app.post(
+    "/v1/evaluate/batch/report",
+    dependencies=[Depends(require_bearer)],
+    summary="Batch-evaluate and return an HTML report",
+    description=(
+        "Same as POST /v1/evaluate/batch but returns a self-contained HTML page "
+        "with per-item colour-coded results tables for easy visual inspection."
+    ),
+    response_class=__import__('fastapi.responses', fromlist=['HTMLResponse']).HTMLResponse,
+)
+async def evaluate_batch_report(req: EvaluateBatchRequest):
+    from fastapi.responses import HTMLResponse
+    result = await run_batch_evaluation(req, get_eval_settings())
+    return HTMLResponse(content=format_batch_html_report(result))
