@@ -2,7 +2,7 @@
 
 End-to-end instructions to run the BankBuddy demo (UI + API + Agent + mock-bank + Postgres + Guardrails) on a developer workstation using Docker Compose.
 
-The repo contains two deployable units:
+The repo contains two deployable units: x
 
 | Unit | Path | Role |
 |------|------|------|
