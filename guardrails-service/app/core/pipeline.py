@@ -270,6 +270,10 @@ class GuardrailPipeline:
                         # in `reasons`.
                         block_reasons.extend(result.reasons or [f"blocked by {guard.name}"])
                         block_categories.extend(result.categories)
+                        # Use the guard's sanitized_text as the working text
+                        # so redact_and_block mode surfaces masked PII in the
+                        # response (for plain block mode this equals original).
+                        current = result.sanitized_text
                     obs_log(
                         "guard.block",
                         level="warning",
@@ -296,6 +300,9 @@ class GuardrailPipeline:
                     blocked = True
                     block_reasons.extend(result.reasons or [f"blocked by {guard.name}"])
                     block_categories.extend(result.categories)
+                    # Use the guard's sanitized_text so redact_and_block
+                    # mode surfaces masked PII (plain block returns original).
+                    current = result.sanitized_text
                     obs_log(
                         "guard.block",
                         level="warning",
