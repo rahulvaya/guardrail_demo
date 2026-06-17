@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..base import Guard, GuardCheckResult, GuardStage
+from ..base import Guard, GuardCheckResult, GuardDecision, GuardStage
 from ..observability import obs_log
 from ..registry import register_guard
 
@@ -80,7 +80,7 @@ class PiiDetectGuard(Guard):
 
     def __init__(self, **config: Any) -> None:
         super().__init__(**config)
-        self.mode: str = str(config.get("mode", "sanitize")).lower()  # sanitize | block
+        self.mode: str = str(config.get("mode", "sanitize")).lower()  # sanitize | block | redact_and_block
         self.engine: str = str(config.get("engine", "presidio")).lower()  # presidio | regex
         self.language: str = str(config.get("language", "en"))
         self.min_score: float = float(config.get("min_score", 0.4))
@@ -153,9 +153,18 @@ class PiiDetectGuard(Guard):
                 sanitized = new
         if not found:
             return self._allow(text)
+        cats = [f"pii.{f.split()[0]}" for f in found]
         if self.mode == "block":
-            return self._block(text, reasons=found, categories=[f"pii.{f.split()[0]}" for f in found])
-        return self._sanitize(sanitized, reasons=found, categories=[f"pii.{f.split()[0]}" for f in found])
+            return self._block(text, reasons=found, categories=cats)
+        if self.mode == "redact_and_block":
+            return GuardCheckResult(
+                guard_name=self.name,
+                decision=GuardDecision.BLOCK,
+                sanitized_text=sanitized,
+                reasons=found,
+                categories=cats,
+            )
+        return self._sanitize(sanitized, reasons=found, categories=cats)
 
     def _check_presidio(self, text: str) -> GuardCheckResult:
         kwargs: dict[str, Any] = {"text": text, "language": self.language}
@@ -163,16 +172,44 @@ class PiiDetectGuard(Guard):
             kwargs["entities"] = self.entities
         results = self._presidio.analyze(**kwargs)  # type: ignore[union-attr]
         results = [r for r in results if getattr(r, "score", 0.0) >= self.min_score]
-        if not results:
+
+        # Supplement Presidio with regex patterns to catch entities that Presidio
+        # under-scores (e.g. phone numbers with invalid area codes score 0.0 in
+        # Presidio because phonenumbers.is_valid_number() returns False).
+        regex_found: list[str] = []
+        regex_sanitized = text
+        if self._patterns:
+            for label, pat, mask in self._patterns:
+                new, n = pat.subn(mask, regex_sanitized)
+                if n > 0:
+                    regex_found.append(f"{label} x{n}")
+                    regex_sanitized = new
+
+        if not results and not regex_found:
             return self._allow(text)
+
+        # Build sanitized text: start with Presidio replacements then apply regex.
         sanitized = text
-        # Sort descending by start so masking doesn't shift later offsets.
         for r in sorted(results, key=lambda r: r.start, reverse=True):
             sanitized = sanitized[: r.start] + f"<{r.entity_type}>" + sanitized[r.end :]
-        reasons = [f"{r.entity_type} (score={r.score:.2f})" for r in results]
-        cats = [f"pii.{r.entity_type.lower()}" for r in results]
+        if regex_found:
+            for label, pat, mask in self._patterns:
+                sanitized, _ = pat.subn(mask, sanitized)
+
+        reasons = [f"{r.entity_type} (score={r.score:.2f})" for r in results] + regex_found
+        cats = [f"pii.{r.entity_type.lower()}" for r in results] + [f"pii.{f.split()[0]}" for f in regex_found]
         if self.mode == "block":
             return self._block(text, reasons=reasons, categories=cats)
+        if self.mode == "redact_and_block":
+            # Sanitize (mask PII) then block — request is rejected but
+            # sanitized_text carries the redacted version for audit.
+            return GuardCheckResult(
+                guard_name=self.name,
+                decision=GuardDecision.BLOCK,
+                sanitized_text=sanitized,
+                reasons=reasons,
+                categories=cats,
+            )
         return self._sanitize(sanitized, reasons=reasons, categories=cats)
 
 
