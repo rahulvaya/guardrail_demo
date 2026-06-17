@@ -29,6 +29,13 @@ DEFAULT_PATTERNS: list[tuple[str, float]] = [
     (r"\\x[0-9a-f]{2}", 0.3),                  # hex escape spam
     (r"base64:\s*[A-Za-z0-9+/=]{40,}", 0.4),
     (r"\brepeat (?:back|verbatim) your (?:system|initial) prompt\b", 0.95),
+    # HTML / script injection
+    (r"<script[\s>]", 0.9),                    # <script> tag
+    (r"\bjavascript\s*:", 0.9),                # javascript: protocol
+    (r"\bdocument\s*\.\s*cookie\b", 0.95),     # cookie stealing
+    (r"\bfetch\s*\(\s*['\"]https?://", 0.8),   # fetch to external URL
+    (r"on(?:error|load|click|mouseover)\s*=", 0.8),  # HTML event handler injection
+    (r"<iframe[\s>]", 0.85),                   # iframe injection
 ]
 
 log = __import__("logging").getLogger("agent.guardrails.prompt_injection")  # noqa: F841  (kept for back-compat; new sites use obs_log)
