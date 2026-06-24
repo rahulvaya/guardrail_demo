@@ -8,9 +8,20 @@ misconfigured caller cannot reach it from the host.
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 from contextlib import asynccontextmanager
 from typing import Any
+
+# Initialize Azure Monitor telemetry (traces, logs, metrics → App Insights).
+# Placed before any other imports so the global tracer provider is set first.
+if os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    from azure.monitor.opentelemetry import configure_azure_monitor  # noqa: PLC0415
+    configure_azure_monitor()
+    # Instrument the openai SDK (used internally by LiteLLM for Azure/OpenAI calls).
+    # Emits gen_ai.* semantic-convention spans — required for "Agents (preview)".
+    from opentelemetry.instrumentation.openai import OpenAIInstrumentor  # noqa: PLC0415
+    OpenAIInstrumentor().instrument()
 
 from bankbuddy_shared.contracts.agent import AgentInvokeRequest, AgentInvokeResponse
 from bankbuddy_shared.interfaces.agent import AgentError

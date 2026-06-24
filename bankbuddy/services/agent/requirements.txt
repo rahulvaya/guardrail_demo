@@ -23,3 +23,11 @@ azure-ai-projects>=1.0.0
 
 # DB driver for LangGraph PostgresSaver
 psycopg[binary,pool]>=3.2.0
+
+# Observability: ships traces, logs, and metrics to Application Insights
+# when APPLICATIONINSIGHTS_CONNECTION_STRING is set.
+# opentelemetry-instrumentation-openai wraps the openai SDK (used internally
+# by LiteLLM) and emits gen_ai.* semantic-convention spans — required for the
+# "Agents (preview)" blade in App Insights.
+azure-monitor-opentelemetry>=1.6.0
+opentelemetry-instrumentation-openai>=0.28b0

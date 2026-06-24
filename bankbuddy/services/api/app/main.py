@@ -2,7 +2,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
+
+# Initialize Azure Monitor telemetry (traces, logs, metrics → App Insights).
+if os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    from azure.monitor.opentelemetry import configure_azure_monitor  # noqa: PLC0415
+    configure_azure_monitor()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

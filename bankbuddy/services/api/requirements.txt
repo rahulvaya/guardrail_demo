@@ -10,3 +10,7 @@ psycopg[binary]>=3.2.0
 # Auth providers
 msal>=1.30.0       # Entra (Microsoft Authentication Library)
 authlib>=1.3.0     # generic OIDC (Auth0, Keycloak, Cognito)
+
+# Observability: ships traces, logs, and metrics to Application Insights
+# when APPLICATIONINSIGHTS_CONNECTION_STRING is set.
+azure-monitor-opentelemetry>=1.6.0

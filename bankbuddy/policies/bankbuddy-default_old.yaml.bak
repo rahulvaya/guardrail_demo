@@ -1,0 +1,529 @@
+# =============================================================================
+# Default BankBuddy retail-banking policy.
+#
+# HOW TO ENABLE / DISABLE A GUARD
+# -------------------------------
+# Every guard below has `enabled: true|false`. Flip it and recreate the
+# guardrails container:
+#
+#     docker compose up -d --force-recreate guardrails
+#
+# Order matters per stage: cheap deterministic checks first, Azure managed
+# checks next, custom scope/output checks last.
+#
+# Guard names must match the canonical hyphenated form registered in
+# app/core/guards/*.py. Run
+#   docker exec bankbuddy-guardrails python -c "from app.core import guards; from app.core.registry import registered_names; print(registered_names())"
+# to list them.
+# =============================================================================
+
+id: bankbuddy-default
+description: BankBuddy retail banking assistant - default policy
+
+# Reusable anchor: the scope/task description BankBuddy enforces via
+# azure-task-adherence. Edit here once; reference with `*banking_task`
+# anywhere in the file.
+banking_task: &banking_task >-
+  BankBuddy is a retail banking customer-service assistant. It only
+  answers questions about the user's own bank accounts, balances,
+  transactions, transfers, payments, cards, loans, mortgages, ATM
+  locations, branch hours, fees, statements, and general retail-banking
+  product information. It must refuse or deflect requests outside this
+  scope (e.g. coding help, general trivia, medical or legal advice,
+  political opinions, investment advice, or any non-banking topic).
+
+# Full PII category set used on outbound stages (output / api_output /
+# tool_input / tool_output) where Address scrubbing is desirable.
+pii_categories_full: &pii_categories
+  - USSocialSecurityNumber
+  - CreditCardNumber
+  - Email
+  - PhoneNumber
+  - Address
+  - IPAddress
+  - ABARoutingNumber
+  - SWIFTCode
+  - InternationalBankingAccountNumber
+  - USDriversLicenseNumber
+  - USIndividualTaxIdentification
+
+# Inbound subset (api_input / input). `Address` is intentionally OMITTED
+# because Azure Language flags US ZIP codes (e.g. "10001") as Address with
+# high confidence, which blocks legitimate banking queries like
+# "Find ATMs near 10001". Keep Address scrubbing only on outbound.
+pii_categories_input: &pii_categories_input
+  - USSocialSecurityNumber
+  - CreditCardNumber
+  - Email
+  - PhoneNumber
+  - IPAddress
+  - ABARoutingNumber
+  - SWIFTCode
+  - InternationalBankingAccountNumber
+  - USDriversLicenseNumber
+  - USIndividualTaxIdentification
+
+# Microsoft Presidio entity whitelist for the local `pii-detect` guard
+# (https://github.com/microsoft/presidio). Keeps the focus on real PII
+# and avoids the noisy NLP-only types (PERSON / DATE_TIME / NRP / LOCATION)
+# that produce false positives on benign banking text.
+presidio_entities: &presidio_entities
+  - EMAIL_ADDRESS
+  - PHONE_NUMBER
+  - CREDIT_CARD
+  - US_SSN
+  - US_BANK_NUMBER
+  - US_DRIVER_LICENSE
+  - US_ITIN
+  - US_PASSPORT
+  - IBAN_CODE
+  - IP_ADDRESS
+  - CRYPTO
+  - MEDICAL_LICENSE
+
+# ---------------------------------------------------------------------------
+# Six pipeline checkpoints (architecture diagram ①…⑥):
+#   ① api_input    — request entering the public chat API
+#   ② input        — user message about to be sent to the LLM (a.k.a. llm_input)
+#   ③ output       — LLM reply coming back to the orchestrator (a.k.a. llm_output)
+#   ④ tool_input   — planned tool call (name + arguments) before execution
+#   ⑤ tool_output  — JSON returned by a tool before it is fed back to the LLM
+#   ⑥ api_output   — final assistant reply leaving the public API
+# Each block is optional; missing = no guards at that checkpoint.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# ① API_INPUT — public API edge. Heaviest set: block hostile traffic before
+# any LLM tokens burn. Most caller-facing.
+# ---------------------------------------------------------------------------
+api_input:
+  - azure-content-safety:    # G-01 Content Filter + G-02 Prompt Shields
+      enabled: true
+      severity_threshold: 2
+      fail_open: false
+      enable_prompt_shield: true
+  - token-limit:             # G-02 DoS guard
+      enabled: true
+      max_chars: 8000
+  - prompt-injection:        # G-02 heuristic backup
+      enabled: true
+  - azure-topic-relevance:   # G-03 Azure managed scope classifier
+      # Disabled per request - topic enforcement turned off.
+      enabled: false
+      categories:
+        - non_banking
+      severity_threshold: 2
+      fail_open: true
+      refusal_message: >-
+        I can only help with banking questions - accounts, cards,
+        transfers, loans, ATMs.
+  - topic-relevance:         # G-03 Intent / scope classifier (banking topics)
+      enabled: false
+      # Shared scope anchor (same as task-adherence). Guard tokenises
+      # the description, drops stopwords, uses remaining content words
+      # as the in-scope vocabulary. Edit `banking_task:` at top of file
+      # and all scope guards stay in sync.
+      task_definition: *banking_task
+      min_ratio: 0.05
+      # Score short queries too ("what is atlanta" is 15 chars). The
+      # whole point of api_input scope-gating is to reject off-topic
+      # questions before they hit the LLM.
+      min_length: 5
+      refusal_message: >-
+        I can only help with banking questions - accounts, cards,
+        transfers, loans, ATMs.
+  - azure-pii-detection:     # G-04 PII Filter (Azure AI Language)
+      enabled: false
+      mode: block
+      min_confidence: 0.3
+      fail_open: true
+      # Inbound subset - Address EXCLUDED (ZIP codes false-positive).
+      categories: *pii_categories_input
+  - pii-detect:              # G-04 PII Filter (Microsoft Presidio — local, deterministic)
+      # Runs alongside Azure PII so values that fall below Azure's
+      # confidence threshold or arrive while Language API is degraded
+      # still get blocked. Presidio is the primary engine; the guard
+      # auto-falls-back to its built-in regex set if the analyzer fails.
+      # min_score applies to Presidio results only; the guard's regex patterns
+      # (us-phone etc.) run as a supplement and are score-independent.
+      enabled: true
+      engine: presidio
+      mode: redact_and_block
+      min_score: 0.35
+      spacy_model: en_core_web_sm
+      entities: *presidio_entities
+  - banned-substrings:       # G-07 Custom Blocklist (env-driven)
+      enabled: false
+      case_sensitive: false
+      allow_overrides: true
+      phrases: ${BANNED_PHRASES_JSON:[]}
+  - sql-injection:           # G-10 SQL injection probes on raw user input
+      enabled: true
+  - schema-enforcement:      # G-11 tool-shape guard; off at api_input
+      enabled: false
+      allow_unknown_tools: true
+
+# ---------------------------------------------------------------------------
+# ④ TOOL_INPUT — planned tool call before execution. Validates the tool
+# name + arguments the LLM produced; prevents PII / secrets from leaking
+# into outbound API calls.
+# ---------------------------------------------------------------------------
+tool_input:
+  - token-limit:             # G-02 oversize args
+      enabled: false
+      max_chars: 8000
+  - azure-pii-detection:     # G-04 redact PII before outbound call
+      enabled: false
+      mode: sanitize
+      min_confidence: 0.5
+      categories: *pii_categories
+  - pii-detect:              # G-04 Presidio redaction (deterministic backup)
+      enabled: true
+      engine: presidio
+      mode: sanitize
+      min_score: 0.4
+      spacy_model: en_core_web_sm
+      entities: *presidio_entities
+  - secret-leak:             # G-05 Sensitive Data Filter
+      enabled: false
+  # G-10 SQL injection in synthesised tool args (account_id, query, etc.)
+  - sql-injection:
+      enabled: true
+  # G-11 Per-tool JSON Schema enforcement on `{tool, arguments}`. Defaults
+  # to allow_unknown_tools=true so the baseline policy is non-breaking;
+  # declare `schemas:` per tool and flip allow_unknown_tools=false to
+  # lock the surface down. Example schemas for the BankBuddy tools are
+  # commented out below.
+  - schema-enforcement:
+      enabled: true
+      strict: true
+      allow_unknown_tools: true
+      # schemas:
+      #   get_transactions:
+      #     input:
+      #       type: object
+      #       additionalProperties: false
+      #       required: [account_id]
+      #       properties:
+      #         account_id: { type: string, pattern: "^[A-Za-z0-9_-]{1,32}$" }
+      #         limit:      { type: integer, minimum: 1, maximum: 100 }
+      #   transfer_funds:
+      #     input:
+      #       type: object
+      #       additionalProperties: false
+      #       required: [from_account, to_account, amount]
+      #       properties:
+      #         from_account: { type: string, pattern: "^[A-Za-z0-9_-]{1,32}$" }
+      #         to_account:   { type: string, pattern: "^[A-Za-z0-9_-]{1,32}$" }
+      #         amount:       { type: number, minimum: 0.01, maximum: 1000000 }
+      #         memo:         { type: string, maxLength: 200 }
+
+# ---------------------------------------------------------------------------
+# ⑥ API_OUTPUT — last hop before the response leaves the public API.
+# Final-line PII / copyright / blocklist / bias sweep.
+# ---------------------------------------------------------------------------
+api_output:
+  - azure-content-safety:    # G-01 + G-06 Copyright + G-07 Blocklist
+      enabled: true
+      severity_threshold: 2
+      enable_protected_material: true
+      blocklist_names: ${ACS_BLOCKLIST_NAMES:[]}
+  - azure-pii-detection:     # G-04 Last-line PII sweep
+      enabled: false
+      mode: sanitize
+      min_confidence: 0.3
+      categories: *pii_categories
+  - pii-detect:              # G-04 Presidio last-line PII sweep
+      enabled: true
+      engine: presidio
+      mode: sanitize
+      min_score: 0.4
+      spacy_model: en_core_web_sm
+      entities: *presidio_entities
+  - secret-leak:             # G-05 Last-line credential check
+      enabled: false
+  - banned-substrings:       # G-07 custom blocklist
+      enabled: false
+      case_sensitive: false
+      allow_overrides: true
+      phrases: ${BANNED_PHRASES_JSON:[]}
+  - bias-detect:             # G-09 Bias Detection (reframe / block)
+      enabled: false
+      engine: lexicon
+  - sql-injection:           # G-10 defense in depth; off on free-text replies
+      enabled: false
+  - schema-enforcement:      # G-11 tool-shape concept; off on free-text replies
+      enabled: false
+      allow_unknown_tools: true
+
+# ---------------------------------------------------------------------------
+# ② INPUT (a.k.a. llm_input) — user message about to be sent to the LLM.
+# Lighter than api_input: validates only the *delta* (retrieved docs +
+# sanitized user text), since api_input has already vetted the raw request.
+# ---------------------------------------------------------------------------
+input:
+  # Cheap DoS guard. Reject obviously oversized inputs.
+  - token-limit:
+      enabled: false
+      max_chars: 8000
+
+  # Hard blocklist of phrases (fraud red-flags, prompt-override tells).
+  - banned-substrings:
+      enabled: false
+      # phrases: ["wire all funds", "ignore previous instructions"]   # uses defaults if omitted
+
+  # Heuristic jailbreak / role-override detector (no GPU required).
+  - prompt-injection:
+      enabled: true
+
+  # Microsoft Presidio PII detector (no cloud call). Catches SSN,
+  # credit-card, email, phone, IPv4, IBAN, etc. deterministically.
+  # Runs alongside the Azure guard so values below Azure's confidence
+  # threshold (or arriving while the Language API is degraded) still
+  # get blocked. Falls back to its own regex set if presidio-analyzer
+  # is unavailable.
+  # min_score applies to Presidio results only; the guard's regex patterns
+  # (us-phone etc.) run as a supplement and are score-independent.
+  - pii-detect:
+      enabled: true
+      engine: presidio
+      mode: redact_and_block
+      min_score: 0.35
+      spacy_model: en_core_web_sm
+      entities: *presidio_entities
+
+  # Azure AI Content Safety (hate, self-harm, sexual, violence, prompt-shield).
+  # severity_threshold=2 blocks any harm category at "low" or above
+  # (FourSeverityLevels: 0=safe, 2=low, 4=medium, 6=high).
+  # fail_open=false: if ACS is unreachable / 401 / 5xx, BLOCK the request
+  # instead of silently allowing. Safer posture for input stage.
+  - azure-content-safety:
+      enabled: true
+      severity_threshold: 2
+      fail_open: false
+
+  # Azure AI Language PII detection.
+  - azure-pii-detection:
+      enabled: false
+      mode: block
+      # Lower threshold so borderline phone/SSN hits aren't dropped.
+      min_confidence: 0.3
+      # Inbound subset - Address EXCLUDED (ZIP codes false-positive).
+      categories: *pii_categories_input
+      # Keep app responsive if Language API is transiently unavailable.
+      fail_open: true
+
+  # Custom scope guard - keep BankBuddy on banking topics.
+  # Azure managed counterpart runs first; falls open -> local backup.
+  - azure-topic-relevance:
+      enabled: false
+      categories:
+        - non_banking
+      severity_threshold: 2
+      fail_open: true
+      refusal_message: >-
+        I can only help with banking questions - accounts, cards,
+        transfers, loans, ATMs.
+  - topic-relevance:
+      enabled: false
+      task_definition: *banking_task
+      min_ratio: 0.05
+      min_length: 5
+      refusal_message: >-
+        I can only help with banking questions - accounts, cards,
+        transfers, loans, ATMs.
+
+  # G-10 SQL injection - block jailbreak prompts that ship raw SQL.
+  - sql-injection:
+      enabled: true
+  # G-11 Schema enforcement - tool-args concept, off on user input.
+  - schema-enforcement:
+      enabled: false
+      allow_unknown_tools: true
+
+# ---------------------------------------------------------------------------
+# OUTPUT pipeline (runs on every assistant message before it leaves the agent)
+# ---------------------------------------------------------------------------
+output:
+  - azure-content-safety:
+      enabled: true
+      severity_threshold: 2
+
+  - azure-pii-detection:
+      enabled: false
+      mode: sanitize
+      min_confidence: 0.3
+      categories: *pii_categories
+
+  # Azure managed Task Adherence: DISABLED because the current Content
+  # Safety resource (v-shs-mnwsbnrd-eastus2) does not expose
+  # detectTaskAdherence (returns 404 on every api-version). Re-enable
+  # once the resource is onboarded for the Agent Guardrails preview or
+  # routed to a supported region. The local `task-adherence` guard
+  # below provides runtime scope enforcement in the meantime.
+  - azure-task-adherence:
+      enabled: false
+      task_definition: *banking_task
+      require_task_definition: false
+      api_version: "2024-09-15-preview"
+      fail_open: true
+
+  # Azure managed Groundedness: when the orchestrator supplies
+  # `context["sources"]` (RAG mode), verifies the reply is supported by
+  # them. Skips ALLOW when no sources are provided.
+  - azure-groundedness:
+      enabled: true
+      domain: Generic
+      task: QnA
+      require_sources: false
+      api_version: "2024-09-15-preview"
+      fail_open: true
+
+  # Microsoft Presidio PII detector on assistant replies. Sanitizes
+  # SSN / card / phone / email / IBAN / IP before they reach the user.
+  - pii-detect:
+      enabled: true
+      engine: presidio
+      mode: sanitize
+      min_score: 0.4
+      spacy_model: en_core_web_sm
+      entities: *presidio_entities
+
+  # Mask PII in the assistant response before it leaves the agent.
+  - output-pii-redact:
+      enabled: false
+
+  # Refuse to leak secrets / API keys / connection strings.
+  - secret-leak:
+      enabled: false
+
+  # Strip or refuse competitor names in answers.
+  - competitor-mentions:
+      enabled: false
+
+  # Toxicity classifier on outgoing text.
+  - toxicity:
+      enabled: false
+
+  # ---- Custom RAI gap-fillers (default OFF; opt in per demo) -----------
+  # Groundedness: BLOCK / SANITIZE replies whose claims are not supported
+  # by retrieved sources (passed in via context["sources"]). Fills the
+  # gap left by Azure AI Content Safety detectGroundedness (preview).
+  - groundedness:
+      enabled: false
+      engine: overlap
+      block_threshold: 0.45
+      warn_threshold: 0.65
+      require_sources: false
+
+  # Task adherence: runtime enforcement that the reply stays within the
+  # declared banking task scope. Complements Foundry's eval-time
+  # TaskAdherenceEvaluator (preview). ENABLED as the active scope guard
+  # while the Azure managed Task Adherence preview is unavailable on
+  # the current Content Safety resource.
+  #
+  # The local guard uses a lightweight keyword engine. To keep policy
+  # authoring DRY, it consumes the SAME free-text `&banking_task`
+  # anchor used by `azure-task-adherence` above: the guard tokenises
+  # the description, drops stopwords, and uses the remaining content
+  # words as its in-scope vocabulary. Edit `banking_task` at the top
+  # of this file and both guards stay in sync.
+  - task-adherence:
+      enabled: true
+      engine: keyword
+      task_definition: *banking_task
+      # Strict mode: any sentence WITHOUT an in-scope keyword (derived
+      # from `task_definition` above) is treated as out-of-scope. No
+      # need to enumerate off-topic vocabulary.
+      strict_in_scope: true
+      block_threshold: 0.34
+      warn_threshold: 0.6
+      min_out_of_scope_sentences: 1
+      min_length: 40
+      block_message: >-
+        I can only help with retail banking topics - accounts, cards,
+        transfers, loans, payments, ATMs, branches, and statements.
+
+  # Bias detection: flag stereotype / demographic-skew patterns the
+  # Hate-Unfairness harm category does not explicitly cover.
+  - bias-detect:
+      enabled: false
+      engine: lexicon
+
+  # G-10 SQL injection - usually irrelevant on natural-language replies.
+  - sql-injection:
+      enabled: false
+  # G-11 Schema enforcement - tool-shape concept, off on free-text output.
+  - schema-enforcement:
+      enabled: false
+      allow_unknown_tools: true
+
+# ---------------------------------------------------------------------------
+# TOOL_OUTPUT pipeline (runs on EVERY tool result before it is fed back to the
+# LLM as a `role: "tool"` message). Defends against:
+#   - prompt-injection text inside tool data (e.g. malicious memo fields)
+#   - PII / SSN / card numbers leaking from downstream services
+#   - oversized payloads blowing the LLM context window
+#   - leaked secrets / API keys / connection strings
+#
+# A BLOCK here does NOT abort the whole conversation. The agent replaces
+# the offending tool result with a sanitized error string and lets the LLM
+# react ("the tool returned data that was withheld by policy"). This keeps
+# the loop responsive while preventing dirty data from reaching the model.
+# ---------------------------------------------------------------------------
+tool_output:
+  - token-limit:
+      enabled: false
+      max_chars: 16000
+
+  - banned-substrings:
+      enabled: false
+
+  - prompt-injection:
+      enabled: false
+
+  - pii-detect:
+      enabled: true
+      engine: presidio
+      mode: sanitize
+      min_score: 0.4
+      spacy_model: en_core_web_sm
+      entities: *presidio_entities
+
+  - azure-content-safety:
+      enabled: true
+      severity_threshold: 2
+
+  - azure-pii-detection:
+      enabled: false
+      mode: sanitize
+      # Strict whitelist — PersonType / DateTime / Person / Organization /
+      # Quantity are noisy on banking JSON. Only act on real PII.
+      categories: *pii_categories
+      min_confidence: 0.5
+
+  - topic-relevance:
+      enabled: false
+
+  - output-pii-redact:
+      enabled: false
+
+  - secret-leak:
+      enabled: false
+
+  - competitor-mentions:
+      enabled: false
+
+  - toxicity:
+      enabled: false
+
+  # G-10 SQL injection - catch SQL fragments echoed by tools that could
+  # poison the LLM context if reflected back.
+  - sql-injection:
+      enabled: false
+  # G-11 Schema enforcement - validates tool response payload against the
+  # declared `output:` schema for the calling tool.
+  - schema-enforcement:
+      enabled: true
+      strict: false              # log shape drift, do not block by default
+      allow_unknown_tools: true
