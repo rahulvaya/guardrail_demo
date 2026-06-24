@@ -62,11 +62,13 @@ from .evaluation import (
 )
 from .settings import get_settings
 
-# Install structured JSON logging on stdout. The service emits one
-# JSON line per event (boot, policy load, check, guard decision). It
-# does NOT ship spans/traces itself - consumers are expected to forward
-# these logs into their own telemetry stack (ELK, Loki, App Insights, ...)
-# and scrape `/metrics` from their existing Prometheus.
+# Initialize Azure Monitor telemetry (traces, logs, metrics → App Insights).
+# configure_azure_monitor() reads APPLICATIONINSIGHTS_CONNECTION_STRING from env.
+if os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    from azure.monitor.opentelemetry import configure_azure_monitor  # noqa: PLC0415
+    configure_azure_monitor()
+
+# Install structured JSON logging on stdout.
 setup_logging(os.getenv("GUARDRAILS_LOG_LEVEL", "INFO"))
 
 settings = get_settings()

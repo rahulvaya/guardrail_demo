@@ -36,6 +36,10 @@ DEFAULT_PATTERNS: list[tuple[str, float]] = [
     (r"\bfetch\s*\(\s*['\"]https?://", 0.8),   # fetch to external URL
     (r"on(?:error|load|click|mouseover)\s*=", 0.8),  # HTML event handler injection
     (r"<iframe[\s>]", 0.85),                   # iframe injection
+    # XML entity injection (XXE)
+    (r"<!DOCTYPE\s+\w[\w\s]*\[", 0.95),        # DOCTYPE with internal subset
+    (r"<!ENTITY\s+\w+\s+SYSTEM\b", 0.95),      # external entity declaration
+    (r"SYSTEM\s+['\"]file://", 0.95),           # file:// in SYSTEM identifier
 ]
 
 log = __import__("logging").getLogger("agent.guardrails.prompt_injection")  # noqa: F841  (kept for back-compat; new sites use obs_log)

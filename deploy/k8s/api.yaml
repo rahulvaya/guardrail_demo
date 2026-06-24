@@ -44,6 +44,8 @@ spec:
             # so the pod starts; CORS will be locked down by the patch.
             - name: PUBLIC_UI_ORIGIN
               value: "*"
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              value: "__APPINSIGHTS_CONNECTION_STRING__"
           readinessProbe:
             httpGet: { path: /health, port: http }
             initialDelaySeconds: 5

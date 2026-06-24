@@ -29,13 +29,28 @@ from ..registry import register_guard
 
 # (label, regex). Built-in defaults; override or extend via config.
 DEFAULT_PATTERNS: dict[str, str] = {
+    # --- Cloud provider credentials ---
     "aws-access-key":  r"\bAKIA[0-9A-Z]{16}\b",
     "aws-secret":      r"(?i)\baws(.{0,20})?(secret|key)[\"'\s:=]+[A-Za-z0-9/+=]{40}\b",
     "github-pat":      r"\bghp_[A-Za-z0-9]{36}\b",
     "openai-key":      r"\bsk-[A-Za-z0-9]{20,}\b",
     "private-key":     r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+    # --- Auth tokens ---
     "jwt":             r"\beyJ[A-Za-z0-9_=-]{10,}\.[A-Za-z0-9_=-]{10,}\.[A-Za-z0-9_=.+/-]{10,}\b",
     "bearer":          r"(?i)\bbearer\s+[A-Za-z0-9._-]{20,}\b",
+    # --- Payment / SaaS vendor keys ---
+    "stripe-key":      r"(?i)\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b",
+    "slack-token":     r"\bxox[bpoas]-[A-Za-z0-9-]{10,}\b",
+    "slack-webhook":   r"hooks\.slack\.com/services/T[A-Z0-9]{6,}/B[A-Z0-9]{6,}/[A-Za-z0-9]{20,}",
+    "gitlab-pat":      r"\bglpat-[A-Za-z0-9_-]{20,}\b",
+    # --- Connection strings ---
+    "azure-storage":   r"AccountKey=[A-Za-z0-9+/]{40,}={0,2}",
+    "db-conn-url":     r"(?i)(?:postgresql|mysql|mongodb(?:\+srv)?|redis|mssql)://\S+@",
+    # --- Generic credential patterns ---
+    "password-value":  r"(?i)\bpassword\s*(?:is\s*)?[:=]\s*\S{8,}",
+    "secret-keyword":  r"(?i)(?:secret|passwd|credential)\s*[:=]\s*\S{8,}",
+    "generic-api-key": r"(?i)\bapi[_-]?key\s*[:=]\s*[A-Za-z0-9_-]{20,}",
+    "token-keyword":   r"(?i)\btoken\s*[:=]\s*[A-Za-z0-9._-]{20,}",
 }
 
 

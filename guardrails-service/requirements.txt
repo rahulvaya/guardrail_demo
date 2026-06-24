@@ -27,6 +27,10 @@ spacy>=3.7,<3.8
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
 
 # Observability:
+#   * azure-monitor-opentelemetry ships traces, logs, and metrics to
+#     Application Insights when APPLICATIONINSIGHTS_CONNECTION_STRING is set.
+#   * prometheus-client powers GET /metrics (histograms, counters, gauges).
+azure-monitor-opentelemetry>=1.6.0
 #   * prometheus-client powers GET /metrics (histograms, counters, gauges).
 #     Without it, /metrics returns 503 and metric calls become no-ops.
 #     The service does NOT ship spans/traces itself; it emits structured

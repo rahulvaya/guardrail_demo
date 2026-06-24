@@ -115,6 +115,7 @@ function Invoke-RenderApply([string] $manifestPath) {
     $rendered = Get-Content $manifestPath -Raw
     $rendered = $rendered.Replace('__ACR_LOGIN_SERVER__', $state.acrLoginServer)
     $rendered = $rendered.Replace('__IMAGE_TAG__', $ImageTag)
+    $rendered = $rendered.Replace('__APPINSIGHTS_CONNECTION_STRING__', $state.appInsightsConnectionString)
     $tmp = New-TemporaryFile
     try {
         Set-Content -Path $tmp -Value $rendered -Encoding UTF8

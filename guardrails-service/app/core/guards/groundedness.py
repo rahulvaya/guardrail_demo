@@ -143,13 +143,8 @@ class GroundednessGuard(Guard):
                     score=0.0,
                     metadata={"engine": self.engine, "sources_count": 0},
                 )
-            return self._sanitize(
-                reply + self.unverified_suffix,
-                reasons=["no sources to verify against; flagged as unverified"],
-                categories=["rai.groundedness.unverified"],
-                score=0.0,
-                metadata={"engine": self.engine, "sources_count": 0},
-            )
+            # No sources and require_sources=false: skip the check entirely.
+            return self._allow(text, metadata={"skipped": "no-sources", "engine": self.engine})
 
         score, per_sentence = self._score(reply, sources)
 

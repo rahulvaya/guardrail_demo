@@ -32,7 +32,7 @@ from ..base import GuardCheckResult, GuardStage
 from ..registry import register_guard
 from ._azure_base import AzureGuardBase
 from .azure_endpoints import (
-    CONTENT_SAFETY_API_VERSION,
+    CONTENT_SAFETY_API_VERSION_TASK_ADHERENCE,
     content_safety_task_adherence_url,
 )
 
@@ -45,7 +45,7 @@ class AzureTaskAdherenceGuard(AzureGuardBase):
         "that drift outside the agent's declared task / scope."
     )
 
-    DEFAULT_API_VERSION = CONTENT_SAFETY_API_VERSION
+    DEFAULT_API_VERSION = CONTENT_SAFETY_API_VERSION_TASK_ADHERENCE
     CHECK_NAME = "text:detectTaskAdherence"
 
     def __init__(self, **config: Any) -> None:

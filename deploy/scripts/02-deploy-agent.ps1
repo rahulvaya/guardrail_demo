@@ -52,6 +52,7 @@ $rendered = $rendered.Replace('__UAMI_CLIENT_ID__', $state.workloadIdentityClien
 $rendered = $rendered.Replace('__AZURE_OPENAI_ENDPOINT__', $state.aiServicesUnifiedEndpoint)
 $rendered = $rendered.Replace('__FOUNDRY_PROJECT_ENDPOINT__', $state.foundryProjectEndpoint)
 $rendered = $rendered.Replace('__OPENAI_DEPLOYMENT__', $state.openAiDeploymentName)
+$rendered = $rendered.Replace('__APPINSIGHTS_CONNECTION_STRING__', $state.appInsightsConnectionString)
 
 $tmp = New-TemporaryFile
 try {

@@ -66,6 +66,8 @@ spec:
               value: "__CONTENT_SAFETY_ENDPOINT__"
             - name: AZURE_LANGUAGE_ENDPOINT
               value: "__AI_SERVICES_ENDPOINT__"
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              value: "__APPINSIGHTS_CONNECTION_STRING__"
           volumeMounts:
             - name: policies
               mountPath: /etc/guardrails/policies

@@ -104,6 +104,12 @@ class TopicRelevanceGuard(Guard):
                 "I can only help with topics in this assistant's configured scope.",
             )
         )
+        # block_phrases: list of strings (may be multi-word) that signal
+        # off-topic or malicious intent. Checked BEFORE allow-keywords so
+        # a phrase like "hack into" overrides "account" being in-scope.
+        # Comparison is case-insensitive substring match on the full text.
+        raw_phrases: list = config.get("block_phrases") or []
+        self.block_phrases: list[str] = [str(p).lower() for p in raw_phrases if p]
 
     async def check(self, text: str, *, context: dict[str, Any] | None = None) -> GuardCheckResult:
         # No keywords configured -> guard is a no-op (domain neutral default).
@@ -112,6 +118,22 @@ class TopicRelevanceGuard(Guard):
 
         if len(text.strip()) < self.min_length:
             return self._allow(text, metadata={"skipped": "too-short"})
+
+        # ── Deny-phrase check (runs before allow-keyword short-circuit) ──────
+        # If ANY block_phrase appears in the text, block immediately.
+        # This catches mixed-intent inputs like "my account is fine, now write
+        # me a poem" where a banking keyword would otherwise allow the request.
+        if self.block_phrases:
+            lower_text = text.lower()
+            hit = next((p for p in self.block_phrases if p in lower_text), None)
+            if hit:
+                return self._block(
+                    text,
+                    reasons=[f"off-topic intent phrase detected: '{hit}'", self.refusal_message],
+                    categories=["policy.off-topic"],
+                    score=1.0,
+                    metadata={"block_phrase": hit},
+                )
 
         words = [w.lower() for w in _WORD_RE.findall(text)]
         if not words:

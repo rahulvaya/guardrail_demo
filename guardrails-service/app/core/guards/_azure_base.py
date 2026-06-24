@@ -33,7 +33,7 @@ from typing import Any, ClassVar
 import httpx
 
 from ..aad_cache import get_bearer_token
-from ..azure_http import get_client
+from ..azure_http import aclose as _reset_http_client, get_client
 from ..base import Guard, GuardCheckResult
 from ..observability import obs_log
 from .azure_endpoints import (
@@ -180,6 +180,10 @@ class AzureGuardBase(Guard):
         ``error`` is ``None`` on success. Per-request timeout follows
         ``self.timeout_seconds`` (independent of the shared client's
         default).
+
+        Retries once on ``RemoteProtocolError`` (HTTP/2 keepalive
+        connections can be closed server-side; resetting the shared
+        client forces a fresh TCP+TLS handshake on the next call).
         """
         try:
             resp = await self._client().post(
@@ -187,6 +191,27 @@ class AzureGuardBase(Guard):
             )
             resp.raise_for_status()
             return resp.json(), None
+        except (httpx.RemoteProtocolError, httpx.WriteError):
+            # Server closed an HTTP/2 keepalive connection (GOAWAY / RST), or
+            # the write failed because the stale connection was half-closed.
+            # Reset the shared pool so the retry opens a fresh connection.
+            obs_log(
+                "guard.azure.http2_reconnect",
+                level="warning",
+                guard=self.name,
+                action="resetting shared client and retrying",
+            )
+            await _reset_http_client()
+            try:
+                resp = await self._client().post(
+                    url, json=payload, headers=headers, timeout=self.timeout_seconds
+                )
+                resp.raise_for_status()
+                return resp.json(), None
+            except httpx.HTTPStatusError as e:
+                return None, format_http_error(e)
+            except Exception as e:  # noqa: BLE001
+                return None, f"request error: {e!r}"
         except httpx.HTTPStatusError as e:
             return None, format_http_error(e)
         except Exception as e:  # noqa: BLE001

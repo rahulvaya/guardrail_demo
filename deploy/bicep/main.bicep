@@ -337,6 +337,23 @@ resource azureAiUserAssign 'Microsoft.Authorization/roleAssignments@2022-04-01' 
 }
 
 // ---------------------------------------------------------------------------
+// Application Insights (workspace-based, linked to Log Analytics)
+// ---------------------------------------------------------------------------
+resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
+  name: 'appi-bankbuddy'
+  location: location
+  kind: 'web'
+  properties: {
+    Application_Type: 'web'
+    WorkspaceResourceId: logAnalytics.id
+    RetentionInDays: 30
+    IngestionMode: 'LogAnalytics'
+    publicNetworkAccessForIngestion: 'Enabled'
+    publicNetworkAccessForQuery: 'Enabled'
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Outputs - consumed by the deploy scripts.
 // ---------------------------------------------------------------------------
 output aksName              string = aks.name
@@ -355,5 +372,6 @@ output aiServicesUnifiedEndpoint string = 'https://${aiServices.name}.services.a
 output contentSafetyName         string = contentSafety.name
 output contentSafetyEndpoint     string = contentSafety.properties.endpoint
 output foundryProjectName        string = foundryProject.name
-output foundryProjectEndpoint    string = 'https://${aiServices.name}.services.ai.azure.com/api/projects/${foundryProject.name}'
-output openAiDeploymentName      string = openAiDeployment.name
+output foundryProjectEndpoint         string = 'https://${aiServices.name}.services.ai.azure.com/api/projects/${foundryProject.name}'
+output openAiDeploymentName           string = openAiDeployment.name
+output appInsightsConnectionString    string = appInsights.properties.ConnectionString

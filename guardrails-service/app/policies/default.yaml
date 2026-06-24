@@ -41,12 +41,13 @@ description: Default domain-neutral policy. Safety + privacy + secret leak.
 #                                topic-relevance        (local scope classifier;
 #                                   supply `keywords:` to activate)
 #   G-03a Task Adherence         azure-task-adherence   (Azure CS preview)
+#                                task-adherence         (local heuristic)
 #   G-04  PII Filtering          azure-pii-detection    (Azure AI Language;
-#                                   mode: block | sanitize;
-#                                   needs AZURE_LANGUAGE_ENDPOINT + KEY)
+#                                   mode: block | sanitize)
 #                                pii-detect             (Microsoft Presidio
 #                                   https://github.com/microsoft/presidio;
-#                                   regex fallback when presidio unavailable)
+#                                   regex fallback when offline)
+#                                output-pii-redact      (sanitize on output)
 #   G-05  Sensitive Data Filter  secret-leak            (API keys, JWTs,
 #                                   connection strings, private keys)
 #   G-06  Copyright Detection    azure-content-safety   (Protected Material
@@ -60,29 +61,16 @@ description: Default domain-neutral policy. Safety + privacy + secret leak.
 #                                   needs context.sources [+ .query for QnA])
 #                                groundedness           (local overlap)
 #   G-09  Bias Detection         bias-detect            (lexicon engine)
-#   G-10  HITL Controls          *** not yet implemented — pending session
-#                                   management standard (SGS-T03) ***
-#   G-11  System Prompt Leakage  *** not yet a registered guard — planned ***
-#                                   (segment hash-match + meta-instruction
-#                                   classifier; see design doc §3 G-11)
-#   G-12  Rate Limiting          *** enforced at APIM + FastAPI middleware —
-#                                   not in this service's pipeline ***
-#   G-13  Identity Context       *** FastAPI request middleware + system
-#                                   prompt constructor — not in this service ***
-#   G-14  RAG Pipeline Controls  *** ABAC filter at vector store retrieval —
-#                                   not in this service ***
-#   G-15  Schema Enforcement     schema-enforcement     (per-tool JSON Schema
+#   G-10  SQL Injection          sql-injection          (pattern guard for
+#                                   UNION/DROP/comment/stacked-statement
+#                                   probes; runs at api_input + tool_input)
+#   G-11  Schema Enforcement     schema-enforcement     (per-tool JSON Schema
 #                                   validation of tool_input arguments and
 #                                   tool_output payloads; blocks shape drift,
 #                                   unknown fields, injection in typed fields)
-#   G-16  Privilege-Scoped Output *** not yet implemented — requires G-13
-#                                   guardrail-context envelope ***
 #
-# NOTE: sql-injection implements the SQL/injection sub-check of G-02.
-# NOTE: G-10, G-11, G-12, G-13, G-14, G-16 are not YAML-pipeline guards;
-#       they are enforced at APIM, middleware, or retrieval layers.
-#
-# Additional registered guards (not tied to a design-doc G-id):
+# Additional registered guards (not tied to a G-id but available in any
+# stage):
 #   competitor-mentions   block configured competitor names on output
 #   toxicity              classifier-based toxicity score
 #
@@ -110,17 +98,15 @@ description: Default domain-neutral policy. Safety + privacy + secret leak.
 # Heaviest set: hostile traffic is rejected here before any LLM tokens burn.
 # ---------------------------------------------------------------------------
 api_input:
-  - azure-content-safety:    # G-01 Content Filter + G-02 Prompt Shields
+  - azure-content-safety:    # G-01 Content Filter (Analyze Text)
       enabled: true
-      enable_harm_analysis: true   # G-01 Hate/SelfHarm/Sexual/Violence
-      enable_prompt_shield: true   # G-02 direct + indirect injection
-      enable_protected_material: false
       severity_threshold: 2
       fail_open: false       # trust boundary: a missing safety net = block
       timeout_seconds: 3
+      enable_prompt_shield: true   # G-02 Input Validation (AZ Prompt Shields)
   - token-limit:             # G-02 Input Validation (DoS guard)
       enabled: true
-      max_chars: 50000
+      max_chars: 8000
   - prompt-injection:        # G-02 Input Validation (heuristic backup)
       enabled: true
   - azure-topic-relevance:   # G-03 Azure managed scope classifier
@@ -134,20 +120,13 @@ api_input:
       severity_threshold: 2
       fail_open: true
   - topic-relevance:         # G-03 Intent Recognition / local scope classifier
-      enabled: true
+      enabled: false
       min_ratio: 0.05
       min_length: 20
-      refusal_message: "I can only help with banking and financial questions. Please ask about your accounts, transactions, balances, loans, cards, or other banking topics."
-      task_definition: >-
-        Finance Agent is a assistant for accounts, balances,
-        transactions, payments, transfers, loans, mortgages, credit and debit
-        cards, savings, investments, fraud, account security, passwords,
-        authentication, fees, statements, and customer support.
-  - azure-pii-detection:     # G-04 PII Filtering (Azure AI Language)
-      enabled: false  # needs AZURE_LANGUAGE_ENDPOINT + AZURE_LANGUAGE_KEY
+  - azure-pii-detection:     # G-04 PII Filtering (Presidio-style block)
+      enabled: true
       mode: block
       min_confidence: 0.5
-      fail_open: true
       # Whitelist: only flag real PII. Excludes DateTime / Person /
       # Organization / Quantity which cause false positives on benign text.
       categories: &pii_categories
@@ -166,7 +145,7 @@ api_input:
       enabled: false
       case_sensitive: false
       allow_overrides: true
-      phrases: []
+      phrases: ${BANNED_PHRASES_JSON:[]}
 
   # ---- Reference entries: all remaining registered guards listed with
   # ---- enabled: false so this stage can serve as a copy-paste template.
@@ -175,10 +154,10 @@ api_input:
   - pii-detect:              # G-04 PII Filtering — Microsoft Presidio (https://github.com/microsoft/presidio)
       enabled: true
       engine: presidio        # presidio | regex (regex is the offline fallback)
-      mode: sanitize             # block | sanitize
+      mode: block             # block | sanitize
       # Presidio scores entities 0.0 – 1.0. 0.3 catches pattern-only SSNs
       # without context words; raise to 0.5 if you see false positives.
-      min_score: 0.35
+      min_score: 0.3
       spacy_model: en_core_web_sm
       # Whitelist Presidio entities so we focus on real PII and avoid the
       # noisy NLP-only types (PERSON / DATE_TIME / NRP / LOCATION).
@@ -195,12 +174,13 @@ api_input:
         - IP_ADDRESS
         - CRYPTO
         - MEDICAL_LICENSE
-  - secret-leak:             # G-05 Sensitive Data Filter — reject leaked creds at the trust boundary
-      enabled: true
-  - azure-task-adherence:    # G-03a; runs at tool_input
+  - output-pii-redact:       # output-only by design; off on input
       enabled: false
-      # task_definitions:
-      #   get_transactions: "Answer questions about account transactions only."
+  - secret-leak:             # G-05; flip on to reject leaked creds in prompts
+      enabled: false
+  - azure-task-adherence:    # G-03a; usually checked on output / tool_input
+      enabled: false
+      require_task_definition: false
   - azure-groundedness:      # output-only (needs LLM reply + sources)
       enabled: false
   - competitor-mentions:     # usually output
@@ -215,10 +195,10 @@ api_input:
       enabled: false
   - task-adherence:          # local heuristic; output-side
       enabled: false
-  # G-02 Input Validation (SQL injection sub-check) — defense in depth at the public entrypoint.
+  # G-10 SQL Injection — defense in depth at the public entrypoint.
   - sql-injection:
       enabled: true
-  # G-15 Schema Enforcement — listed for completeness; arguments shape is
+  # G-11 Schema Enforcement — listed for completeness; arguments shape is
   # only meaningful at tool_input. Off at api_input.
   - schema-enforcement:
       enabled: false
@@ -232,95 +212,25 @@ api_input:
 tool_input:
   - token-limit:             # G-02 Input Validation (oversize args)
       enabled: true
-      max_chars: 50000
+      max_chars: 8000
   - azure-task-adherence:    # G-03a Task Adherence (vs user intent)
+      enabled: false
+      require_task_definition: false
+  - azure-pii-detection:     # G-04 PII Filtering on outbound params
       enabled: true
-      fail_open: true
-      # Scope is defined entirely in policy — callers cannot override it.
-      # Each tool is mapped to a free-text task definition that describes
-      # the permitted scope of its response. Tools not listed are skipped.
-      task_definitions:
-        # --- Transaction retrieval ---
-        get_transactions: >-
-          Fetch and return raw transaction records for a single account or
-          all accounts from the Open Finance API. Respond only with
-          transaction data; do not offer analysis, advice, or commentary.
-        fetch_transactions_for_period: >-
-          Fetch and return merchant transaction records for a specific time
-          period from the aic-data-service. Respond only with transaction
-          data; do not offer analysis, advice, or commentary.
-        # --- Cashflow and analysis ---
-        detect_recurring_patterns: >-
-          Analyse the most recently loaded transactions and return
-          identified recurring debit, credit, and unclassified patterns.
-          Respond only with pattern data derived from existing transaction
-          state; do not fetch new data or provide financial advice.
-        get_cashflow_report: >-
-          Call the Finicity Cash Flow Business Report and return a compact
-          summary of monthly inflow, outflow, net, and account balances.
-          Respond only with cashflow summary data; do not provide
-          investment or financial advice.
-        # --- Financial statements ---
-        get_report: >-
-          Return the full unsummarized Finicity report including
-          institutions, accounts, and raw analytics. Respond only with
-          report data; do not interpret, summarize, or provide advice.
-        get_categorized_expenses: >-
-          Derive and return expense categories from transaction history,
-          including per-category amount, percentage, monthly average, and
-          trend. Respond only with categorized expense data.
-        get_revenue_monthly: >-
-          Return the monthly revenue series with growth percentages and
-          total. Respond only with revenue data; do not provide forecasts
-          or financial advice.
-        extract_monthly_analytics_tool: >-
-          Transform an existing report JSON and return inflow, outflow,
-          and net series by period. Respond only with the derived analytics
-          series; do not fetch new data or provide advice.
-        # --- Receivables and payables ---
-        get_receivables: >-
-          Return outstanding receivables with aging buckets (on-time,
-          15–30 days late, 30+ days late) and average days to pay.
-          Respond only with receivables data; do not provide advice.
-        get_payables: >-
-          Return outstanding payables with aging buckets and average days
-          to pay. Respond only with payables data; do not provide advice.
-  - azure-pii-detection:     # G-04 PII Filtering on outbound params (Azure AI Language)
-      enabled: false  # needs AZURE_LANGUAGE_ENDPOINT + AZURE_LANGUAGE_KEY
       mode: sanitize
       min_confidence: 0.5
-      fail_open: true
       categories: *pii_categories
-  - pii-detect:              # G-04 PII Filtering — Microsoft Presidio (regex fallback if presidio unavailable)
+  - pii-detect:              # local regex fallback
       enabled: true
-      engine: presidio        # presidio | regex (regex is the offline fallback)
-      mode: sanitize  # block | sanitize | redact_and_block
-      min_score: 0.35
-      spacy_model: en_core_web_sm
-      entities:
-        - EMAIL_ADDRESS
-        - PHONE_NUMBER
-        - CREDIT_CARD
-        - US_SSN
-        - US_BANK_NUMBER
-        - US_DRIVER_LICENSE
-        - US_ITIN
-        - US_PASSPORT
-        - IBAN_CODE
-        - IP_ADDRESS
-        - CRYPTO
-        - MEDICAL_LICENSE
+      mode: sanitize
   - secret-leak:             # G-05 Sensitive Data Filter
       enabled: true
 
   # ---- Reference entries: all remaining registered guards listed with
   # ---- enabled: false. Flip on per your tool surface.
-  # harm categories on outbound tool args
-  - azure-content-safety:
+  - azure-content-safety:    # harm categories on outbound tool args
       enabled: false
-      enable_harm_analysis: true
-      enable_prompt_shield: false
-      enable_protected_material: false
       severity_threshold: 2
       fail_open: true
       timeout_seconds: 3
@@ -333,11 +243,13 @@ tool_input:
       enabled: false
   - prompt-injection:        # block injection text in synthesised tool args
       enabled: false
+  - output-pii-redact:       # output-only by design
+      enabled: false
   - banned-substrings:
       enabled: false
       case_sensitive: false
       allow_overrides: true
-      phrases: []
+      phrases: ${BANNED_PHRASES_JSON:[]}
   - topic-relevance:         # local scope fallback
       enabled: false
       # keywords: ["account","balance","loan","card","atm"]
@@ -352,12 +264,11 @@ tool_input:
       enabled: false
   - task-adherence:          # output-only
       enabled: false
-      # task_definitions:
-      #   get_transactions: "Answer questions about transactions only."
+  # G-10 SQL Injection — primary checkpoint: scans synthesized tool args
   # before any DB-backed tool call leaves the agent.
   - sql-injection:
       enabled: true
-  # G-15 Schema Enforcement — validates `{tool, arguments}` payload
+  # G-11 Schema Enforcement — validates `{tool, arguments}` payload
   # against per-tool JSON Schemas. Defaults to allow_unknown_tools=true
   # so the baseline policy is non-breaking; declare `schemas:` per tool
   # and set allow_unknown_tools=false to lock the surface down.
@@ -365,118 +276,36 @@ tool_input:
       enabled: true
       strict: true
       allow_unknown_tools: true
-      schemas:
-        # --- Transaction retrieval ---
-        get_transactions:
-          input:
-            type: object
-            additionalProperties: false
-            required: [account_id, start_date, end_date]
-            properties:
-              account_id: { type: string, pattern: "^(all|[A-Za-z0-9_-]{1,64})$" }
-              start_date: { type: string, pattern: "^\\d{4}-\\d{2}-\\d{2}$" }
-              end_date:   { type: string, pattern: "^\\d{4}-\\d{2}-\\d{2}$" }
-              limit:      { type: integer, minimum: 1, maximum: 500 }
-        fetch_transactions_for_period:
-          input:
-            type: object
-            additionalProperties: false
-            required: [start_date, end_date]
-            properties:
-              start_date: { type: string, pattern: "^\\d{4}-\\d{2}-\\d{2}$" }
-              end_date:   { type: string, pattern: "^\\d{4}-\\d{2}-\\d{2}$" }
-              limit:      { type: integer, minimum: 1, maximum: 500 }
-        # --- Cashflow and analysis ---
-        detect_recurring_patterns:
-          input:
-            type: object
-            additionalProperties: false
-            properties: {}
-        get_cashflow_report:
-          input:
-            type: object
-            additionalProperties: false
-            properties: {}
-        # --- Financial statements ---
-        get_report:
-          input:
-            type: object
-            additionalProperties: false
-            properties: {}
-        get_categorized_expenses:
-          input:
-            type: object
-            additionalProperties: false
-            properties:
-              period_months: { type: integer, minimum: 1, maximum: 24 }
-        get_revenue_monthly:
-          input:
-            type: object
-            additionalProperties: false
-            properties:
-              period_months: { type: integer, minimum: 1, maximum: 24 }
-        extract_monthly_analytics_tool:
-          input:
-            type: object
-            additionalProperties: false
-            required: [report_json]
-            properties:
-              report_json: { type: string, minLength: 2 }
-        # --- Receivables and payables ---
-        get_receivables:
-          input:
-            type: object
-            additionalProperties: false
-            properties:
-              company_id:    { type: string, maxLength: 64 }
-              period_months: { type: integer, minimum: 1, maximum: 24 }
-        get_payables:
-          input:
-            type: object
-            additionalProperties: false
-            properties:
-              company_id:    { type: string, maxLength: 64 }
-              period_months: { type: integer, minimum: 1, maximum: 24 }
+      # schemas:
+      #   get_transactions:
+      #     input:
+      #       type: object
+      #       additionalProperties: false
+      #       required: [account_id]
+      #       properties:
+      #         account_id: { type: string, pattern: "^[A-Za-z0-9_-]{1,32}$" }
+      #         limit:      { type: integer, minimum: 1, maximum: 100 }
 
 # ---------------------------------------------------------------------------
 # ⑥ API_OUTPUT  — last hop before the response leaves the public API.
 # Final-line PII / copyright / blocklist / bias sweep.
 # ---------------------------------------------------------------------------
 api_output:
-  - azure-content-safety:    # G-01 Content Filter + G-06 Copyright Detection
+  - azure-content-safety:    # G-01 Content Filter + G-06 + G-07
       enabled: true
-      enable_harm_analysis: true   # G-01 Hate/SelfHarm/Sexual/Violence
-      enable_prompt_shield: false  # no injection check needed on final reply
-      enable_protected_material: true   # G-06 Copyright Detection
       severity_threshold: 2
       fail_open: true        # don't lose a clean reply to a transient blip
       timeout_seconds: 3
-      blocklist_names: []   # G-07 Custom Blocklist
-  - azure-pii-detection:     # G-04 Last-line PII sweep (Azure AI Language)
-      enabled: false  # needs AZURE_LANGUAGE_ENDPOINT + AZURE_LANGUAGE_KEY
+      enable_protected_material: true     # G-06 Copyright Detection
+      blocklist_names: ${ACS_BLOCKLIST_NAMES:[]}   # G-07 Custom Blocklist
+  - azure-pii-detection:     # G-04 Last-line PII sweep
+      enabled: true
       mode: sanitize
       min_confidence: 0.5
-      fail_open: true
       categories: *pii_categories
-  - pii-detect:              # G-04 PII Filtering — Microsoft Presidio (regex fallback if presidio unavailable)
+  - pii-detect:              # local regex fallback
       enabled: true
-      engine: presidio        # presidio | regex (regex is the offline fallback)
       mode: sanitize
-      min_score: 0.35
-      spacy_model: en_core_web_sm
-      entities:
-        - EMAIL_ADDRESS
-        - PHONE_NUMBER
-        - CREDIT_CARD
-        - US_SSN
-        - US_BANK_NUMBER
-        - US_DRIVER_LICENSE
-        - US_ITIN
-        - US_PASSPORT
-        - IBAN_CODE
-        - IP_ADDRESS
-        - CRYPTO
-        - MEDICAL_LICENSE
   - secret-leak:             # G-05 Last-line credential check
       enabled: true
   - banned-substrings:       # G-07 Custom blocklist on final reply
@@ -492,33 +321,25 @@ api_output:
   # ---- enabled: false so this stage can serve as a copy-paste template.
   - token-limit:             # reject oversized assistant replies
       enabled: false
-      max_chars: 50000
+      max_chars: 16000
   - prompt-injection:        # catch injection text echoed back
+      enabled: false
+  - output-pii-redact:       # token-level PII redactor
       enabled: false
   - azure-groundedness:      # requires context.sources [+ .query for QnA]
       enabled: false
       domain: Generic
       task: QnA
       require_sources: false
-  - azure-task-adherence:    # requires policy task_definitions
+  - azure-task-adherence:    # requires context.task_definition
       enabled: false
-      # task_definitions:
-      #   get_transactions: "Answer questions about account transactions only."
-  - task-adherence:          # local heuristic
+      require_task_definition: false
+  - azure-topic-relevance:   # scope check on final reply (rare)
       enabled: false
-      # task_definitions:
-      #   get_transactions: "Answer questions about transactions only."
-  # G-03 Domain Relevancy Check — design doc places G-03 at API Output as
-  # the final output domain classification before delivery. Both guards are
-  # disabled by default because they require domain-specific configuration
-  # (trained Custom Category for azure-topic-relevance; keywords list for
-  # topic-relevance). Supply keywords / categories for your domain to activate.
-  - azure-topic-relevance:   # G-03 Azure managed scope classifier — enable with categories: [...]
-      enabled: false
-      categories: []         
+      categories: []
       severity_threshold: 2
       fail_open: true
-  - topic-relevance:         # G-03 local fallback — enable with keywords: [...]
+  - topic-relevance:         # local scope fallback
       enabled: false
       # keywords: ["account","balance","loan","card","atm"]
   - competitor-mentions:
@@ -532,11 +353,13 @@ api_output:
       block_threshold: 0.45
       warn_threshold: 0.65
       require_sources: false
-  # G-02 Input Validation (SQL injection sub-check) — defense in depth on outbound replies; off by
+  - task-adherence:          # local heuristic
+      enabled: false
+  # G-10 SQL Injection — defense in depth on outbound replies; off by
   # default because legitimate assistant text may discuss SQL.
   - sql-injection:
       enabled: false
-  # G-15 Schema Enforcement — output-shape only applies to tool payloads.
+  # G-11 Schema Enforcement — output-shape only applies to tool payloads.
   - schema-enforcement:
       enabled: false
       allow_unknown_tools: true
@@ -549,7 +372,7 @@ api_output:
 # Canonical guard names (must match registry):
 #   azure-content-safety, azure-groundedness, azure-pii-detection,
 #   azure-task-adherence, banned-substrings, bias-detect,
-#   competitor-mentions, groundedness, pii-detect,
+#   competitor-mentions, groundedness, output-pii-redact, pii-detect,
 #   prompt-injection, schema-enforcement, secret-leak, sql-injection,
 #   task-adherence, token-limit, topic-relevance, toxicity
 # ---------------------------------------------------------------------------
@@ -561,7 +384,7 @@ input:
   # Cheap DoS guard. Reject obviously oversized inputs.
   - token-limit:
       enabled: true
-      max_chars: 50000
+      max_chars: 8000
 
   # Hard blocklist of phrases.
   # Sources (merged, case-insensitive, de-duped):
@@ -577,7 +400,7 @@ input:
       enabled: false
       case_sensitive: false
       allow_overrides: true
-      phrases: []
+      phrases: ${BANNED_PHRASES_JSON:[]}
       
   # Heuristic jailbreak / role-override detector (no GPU required).
   # Built-in PATTERNS catalog ships with ~10 patterns covering
@@ -591,27 +414,24 @@ input:
       enabled: true
       # block_threshold: 0.7
 
-  # Microsoft Presidio PII detector. Falls back to regex if presidio-analyzer
-  # is not installed. Presidio scores 0.0–1.0; raise min_score if noisy.
-  - pii-detect:              # G-04 PII Filtering — Microsoft Presidio (regex fallback if presidio unavailable)
+  # Local regex PII detector (no cloud call).
+  # Default labels: email, ssn, credit-card, us-phone, ipv4, iban.
+  # Replace or extend per environment:
+  #   patterns:             # REPLACES the default catalog
+  #     email: {regex: "\\b[\\w.+-]+@[\\w-]+\\.[\\w.-]+\\b", mask: "<EMAIL>"}
+  #   extra_patterns:       # MERGED on top of active set
+  #     nhs-number: "\\b\\d{3} \\d{3} \\d{4}\\b"
+  - pii-detect:
       enabled: true
-      engine: presidio        # presidio | regex (regex is the offline fallback)
-      mode: sanitize  # block | sanitize | redact_and_block
-      min_score: 0.35
-      spacy_model: en_core_web_sm
-      entities:
-        - EMAIL_ADDRESS
-        - PHONE_NUMBER
-        - CREDIT_CARD
-        - US_SSN
-        - US_BANK_NUMBER
-        - US_DRIVER_LICENSE
-        - US_ITIN
-        - US_PASSPORT
-        - IBAN_CODE
-        - IP_ADDRESS
-        - CRYPTO
-        - MEDICAL_LICENSE
+      mode: block
+
+  # Output-only PII redactor. Listed for completeness; keep disabled on input.
+  # Built-in masks: @card (preserves last 4), @iban (preserves first 4).
+  # Custom example:
+  #   extra_patterns:
+  #     uk-sortcode: {regex: "\\b\\d{2}-\\d{2}-\\d{2}\\b", mask: "**-**-**"}
+  - output-pii-redact:
+      enabled: false
 
   # Refuse leaked secrets / API keys / connection strings in user input.
   # Default labels: aws-access-key, aws-secret, github-pat, openai-key,
@@ -622,25 +442,23 @@ input:
   - secret-leak:
       enabled: true
 
-  # G-01 + G-02 — harm analysis (G-01) + Prompt Shields (G-02) run in
-  # parallel. No Protected Material check needed on user messages.
-  # fail_open: true because api_input already ran fail-closed.
+  # Azure AI Content Safety (harm categories + prompt-shield on input).
+  # fail_open: true here — api_input already runs the same guard
+  # fail-closed at the trust boundary, so we don't need a second
+  # fail-closed call here. Avoids blocking the whole turn on a
+  # transient ACS timeout.
   - azure-content-safety:
       enabled: true
-      enable_harm_analysis: true   # G-01 Hate/SelfHarm/Sexual/Violence
-      enable_prompt_shield: true   # G-02 direct + indirect injection
-      enable_protected_material: false
       severity_threshold: 2
       fail_open: true
+      enable_prompt_shield: true
       timeout_seconds: 3
       # blocklist_names: ["corp-blocked-terms"]
       # halt_on_blocklist_hit: true
 
-  # Azure AI Language PII detection. Higher-accuracy than Presidio but
-  # requires AZURE_LANGUAGE_ENDPOINT + AZURE_LANGUAGE_KEY. Position it
-  # before pii-detect so Azure runs first; Presidio acts as the fallback.
+  # Azure AI Language PII detection.
   - azure-pii-detection:
-      enabled: false  # needs AZURE_LANGUAGE_ENDPOINT + AZURE_LANGUAGE_KEY
+      enabled: true
       mode: block
       min_confidence: 0.5
       fail_open: true
@@ -652,12 +470,6 @@ input:
 
   # Azure managed Task Adherence — OUTPUT-only check. Disabled on input.
   - azure-task-adherence:
-      enabled: false
-      # task_definitions:
-      #   get_transactions: "Answer questions about account transactions only."
-
-  # Task adherence (local heuristic) — output-side check. Disabled on input.
-  - task-adherence:
       enabled: false
 
   # Azure managed scope classifier. Runs first; local `topic-relevance`
@@ -694,11 +506,15 @@ input:
   - groundedness:
       enabled: false
 
-  # G-02 Input Validation (SQL injection sub-check) — block jailbreak prompts that ship raw SQL.
+  # Task adherence (local heuristic) — output-side check. Disabled on input.
+  - task-adherence:
+      enabled: false
+
+  # G-10 SQL Injection — block jailbreak prompts that ship raw SQL.
   - sql-injection:
       enabled: true
 
-  # G-15 Schema Enforcement — tool-args concept, off on user input.
+  # G-11 Schema Enforcement — tool-args concept, off on user input.
   - schema-enforcement:
       enabled: false
       allow_unknown_tools: true
@@ -710,7 +526,7 @@ output:
   # Reject oversized assistant replies.
   - token-limit:
       enabled: false
-      max_chars: 50000
+      max_chars: 16000
 
   # Hard blocklist of phrases in assistant output.
   - banned-substrings:
@@ -724,52 +540,34 @@ output:
   - prompt-injection:
       enabled: false
 
-  # G-04 PII Filtering — design doc places G-04 at LLM Input (before the LLM
-  # sees it) and API Output (final sweep), not at LLM Output. Disabled here
-  # to avoid a redundant mid-pipeline PII pass; api_output catches it.
-  - pii-detect:              # G-04 PII Filtering — Microsoft Presidio (regex fallback if presidio unavailable)
+  # Local regex PII fallback on assistant replies.
+  - pii-detect:
       enabled: true
-      engine: presidio        # presidio | regex (regex is the offline fallback)
       mode: sanitize
-      min_score: 0.35
-      spacy_model: en_core_web_sm
-      entities:
-        - EMAIL_ADDRESS
-        - PHONE_NUMBER
-        - CREDIT_CARD
-        - US_SSN
-        - US_BANK_NUMBER
-        - US_DRIVER_LICENSE
-        - US_ITIN
-        - US_PASSPORT
-        - IBAN_CODE
-        - IP_ADDRESS
-        - CRYPTO
-        - MEDICAL_LICENSE
 
+  # Redact PII tokens in assistant replies (sanitize-style).
+  - output-pii-redact:
+      enabled: false
 
   # Refuse to leak secrets / API keys / connection strings.
   - secret-leak:
       enabled: true
 
-  # G-01 + G-06 — harm analysis on LLM replies + Protected Material
-  # copyright detection. No Prompt Shields needed on generated output.
+  # Azure AI Content Safety (harm categories + Protected Material on output).
+  # fail_open: true — api_output runs the same guard for the final sweep;
+  # we don't want a transient ACS blip to lose a clean LLM reply.
   - azure-content-safety:
       enabled: true
-      enable_harm_analysis: true   # G-01 Hate/SelfHarm/Sexual/Violence
-      enable_prompt_shield: false  # not applicable on LLM output
-      enable_protected_material: true   # G-06 Copyright Detection
       severity_threshold: 2
       fail_open: true
+      enable_protected_material: true
       timeout_seconds: 3
       # blocklist_names: ["corp-blocked-terms"]
 
-  # Azure AI Language PII detection on assistant replies.
   - azure-pii-detection:
-      enabled: false  # needs AZURE_LANGUAGE_ENDPOINT + AZURE_LANGUAGE_KEY
+      enabled: true
       mode: sanitize
       min_confidence: 0.5
-      fail_open: true
       categories: *pii_categories
 
   # Azure managed Groundedness: requires `sources` in request context.
@@ -779,15 +577,10 @@ output:
       task: QnA
       require_sources: false
 
-  # Azure managed Task Adherence: scope defined in policy via task_definitions.
+  # Azure managed Task Adherence: requires `task_definition` in context.
   - azure-task-adherence:
       enabled: false
-      # task_definitions:
-      #   get_transactions: "Answer questions about account transactions only."
-
-  # Local task-adherence heuristic.
-  - task-adherence:
-      enabled: false
+      require_task_definition: false
 
   # Azure managed scope classifier on output (rare).
   - azure-topic-relevance:
@@ -810,27 +603,28 @@ output:
   - toxicity:
       enabled: false
 
-  # G-09 Bias Detection — design doc places this at API Output only, not LLM
-  # Output. Disabled here; api_output runs the definitive bias sweep.
+  # Bias detection: flag stereotype / demographic-skew patterns.
   - bias-detect:
-      enabled: false
+      enabled: true
       engine: lexicon
 
-  # G-08 Hallucination Detection — design doc places this at LLM Output.
-  # Skips gracefully when context.sources is not supplied (require_sources:
-  # false). Enable azure-groundedness below for the managed API variant.
+  # Local heuristic groundedness (overlap-based, no Azure dependency).
   - groundedness:
-      enabled: true
+      enabled: false
       engine: overlap
       block_threshold: 0.45
       warn_threshold: 0.65
       require_sources: false
 
-  # G-02 Input Validation (SQL injection sub-check) — usually irrelevant on natural-language replies.
+  # Local task-adherence heuristic.
+  - task-adherence:
+      enabled: false
+
+  # G-10 SQL Injection — usually irrelevant on natural-language replies.
   - sql-injection:
       enabled: false
 
-  # G-15 Schema Enforcement — tool-shape concept, off on free-text output.
+  # G-11 Schema Enforcement — tool-shape concept, off on free-text output.
   - schema-enforcement:
       enabled: false
       allow_unknown_tools: true
@@ -846,7 +640,7 @@ output:
 tool_output:
   - token-limit:
       enabled: true
-      max_chars: 50000
+      max_chars: 16000
 
   - banned-substrings:
       enabled: false
@@ -854,48 +648,26 @@ tool_output:
   - prompt-injection:
       enabled: true
 
-  - pii-detect:              # G-04 PII Filtering — Microsoft Presidio (regex fallback if presidio unavailable)
+  - pii-detect:
       enabled: true
-      engine: presidio        # presidio | regex (regex is the offline fallback)
-      mode: sanitize  # block | sanitize | redact_and_block
-      min_score: 0.35
-      spacy_model: en_core_web_sm
-      entities:
-        - EMAIL_ADDRESS
-        - PHONE_NUMBER
-        - CREDIT_CARD
-        - US_SSN
-        - US_BANK_NUMBER
-        - US_DRIVER_LICENSE
-        - US_ITIN
-        - US_PASSPORT
-        - IBAN_CODE
-        - IP_ADDRESS
-        - CRYPTO
-        - MEDICAL_LICENSE
+      mode: sanitize
 
+  - output-pii-redact:
+      enabled: false
 
   - secret-leak:
       enabled: true
 
-  # G-01 + G-02 — harm analysis (G-01) + Prompt Shields (G-02) to detect
-  # injection content embedded in tool results before they reach the LLM.
-  # Both calls run in parallel. No Protected Material needed on tool data.
   - azure-content-safety:
       enabled: true
-      enable_harm_analysis: true   # G-01 Hate/SelfHarm/Sexual/Violence
-      enable_prompt_shield: true   # G-02 indirect injection in tool data
-      enable_protected_material: false
       severity_threshold: 2
       fail_open: true
       timeout_seconds: 3
 
-  # Azure AI Language PII detection on tool results.
   - azure-pii-detection:
-      enabled: false  # needs AZURE_LANGUAGE_ENDPOINT + AZURE_LANGUAGE_KEY
+      enabled: true
       mode: sanitize
       min_confidence: 0.5
-      fail_open: true
       categories: *pii_categories
 
   # Azure managed Groundedness — typically output-only. Off here.
@@ -905,8 +677,6 @@ tool_output:
   # Azure managed Task Adherence — typically output-only. Off here.
   - azure-task-adherence:
       enabled: false
-      # task_definitions:
-      #   get_transactions: "Answer questions about account transactions only."
 
   - azure-topic-relevance:
       enabled: false
@@ -933,149 +703,14 @@ tool_output:
   - task-adherence:
       enabled: false
 
-  # G-02 Input Validation (SQL injection sub-check) — catch SQL fragments in
-  # tool responses that could be reflected back into the LLM context.
+  # G-10 SQL Injection — defense in depth: catch SQL fragments in tool
+  # responses that could later be reflected back into the LLM context.
   - sql-injection:
-      enabled: true
+      enabled: false
 
-  # G-15 Schema Enforcement — validates the tool's response payload
+  # G-11 Schema Enforcement — validates the tool's response payload
   # against the declared `output:` schema for the calling tool.
   - schema-enforcement:
       enabled: true
       strict: false              # log shape drift, do not block by default
       allow_unknown_tools: true
-      schemas:
-        # --- Transaction retrieval ---
-        get_transactions:
-          output:
-            type: array
-            items:
-              type: object
-              required: [id, account_id, booking_date, amount, currency, transaction_type]
-              properties:
-                id:               { type: string }
-                account_id:       { type: string }
-                booking_date:     { type: string }
-                amount:           { type: number, minimum: 0 }
-                currency:         { type: string, minLength: 3, maxLength: 3 }
-                description:      { type: string }
-                category:         { type: ["string", "null"] }
-                transaction_type: { type: string, enum: [credit, debit] }
-        fetch_transactions_for_period:
-          output:
-            type: array
-            items:
-              type: object
-              required: [id, account_id, transaction_type, booking_date, amount]
-              properties:
-                id:               { type: string }
-                account_id:       { type: string }
-                transaction_type: { type: string, enum: [credit, debit] }
-                booking_date:     { type: string }
-                amount:           { type: number, minimum: 0 }
-                category:         { type: string }
-                description:      { type: string }
-        # --- Cashflow and analysis ---
-        detect_recurring_patterns:
-          output:
-            type: object
-            required: [debits, credits, unclassified]
-            properties:
-              debits:       { type: array }
-              credits:      { type: array }
-              unclassified: { type: array }
-        get_cashflow_report:
-          output:
-            type: object
-            properties:
-              status:           { type: ["string", "null"] }
-              report_id:        { type: ["string", "null"] }
-              accounts:         { type: array }
-              customer_summary: { type: object }
-        # --- Financial statements ---
-        get_report:
-          output:
-            type: object
-        get_categorized_expenses:
-          output:
-            type: object
-            required: [categories, total_expenses]
-            properties:
-              categories:
-                type: array
-                items:
-                  type: object
-                  required: [category, amount, pct, monthly_avg, trend]
-                  properties:
-                    category:    { type: string }
-                    amount:      { type: number, minimum: 0 }
-                    pct:         { type: number, minimum: 0, maximum: 100 }
-                    monthly_avg: { type: number, minimum: 0 }
-                    trend:       { type: string }
-              total_expenses: { type: number, minimum: 0 }
-        get_revenue_monthly:
-          output:
-            type: object
-            required: [monthly, total_revenue]
-            properties:
-              monthly:
-                type: array
-                items:
-                  type: object
-                  required: [month, amount]
-                  properties:
-                    month:      { type: string }
-                    amount:     { type: number }
-                    growth_pct: { type: ["number", "null"] }
-              total_revenue: { type: number, minimum: 0 }
-        extract_monthly_analytics_tool:
-          output:
-            type: object
-            required: [inflow, outflow, net]
-            properties:
-              inflow:
-                type: array
-                items:
-                  type: object
-                  required: [period, amount]
-                  properties:
-                    period: { type: string }
-                    amount: { type: number }
-              outflow:
-                type: array
-                items:
-                  type: object
-                  required: [period, amount]
-                  properties:
-                    period: { type: string }
-                    amount: { type: number }
-              net:
-                type: array
-                items:
-                  type: object
-                  required: [period, amount]
-                  properties:
-                    period: { type: string }
-                    amount: { type: number }
-        # --- Receivables and payables ---
-        get_receivables:
-          output:
-            type: object
-            required: [total_outstanding, on_time_pct, late_15_30_pct, late_30_plus_pct, average_days_to_pay]
-            properties:
-              total_outstanding:   { type: number, minimum: 0 }
-              on_time_pct:         { type: number, minimum: 0, maximum: 100 }
-              late_15_30_pct:      { type: number, minimum: 0, maximum: 100 }
-              late_30_plus_pct:    { type: number, minimum: 0, maximum: 100 }
-              average_days_to_pay: { type: number, minimum: 0 }
-        get_payables:
-          output:
-            type: object
-            required: [total_outstanding, current_pct, late_1_30_pct, late_31_60_pct, late_60_plus_pct, average_days_to_pay]
-            properties:
-              total_outstanding:   { type: number, minimum: 0 }
-              current_pct:         { type: number, minimum: 0, maximum: 100 }
-              late_1_30_pct:       { type: number, minimum: 0, maximum: 100 }
-              late_31_60_pct:      { type: number, minimum: 0, maximum: 100 }
-              late_60_plus_pct:    { type: number, minimum: 0, maximum: 100 }
-              average_days_to_pay: { type: number, minimum: 0 }

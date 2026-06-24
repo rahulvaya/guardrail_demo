@@ -74,9 +74,10 @@ $state = [ordered]@{
     aiServicesUnifiedEndpoint = $outputs.aiServicesUnifiedEndpoint.value
     contentSafetyName       = $outputs.contentSafetyName.value
     contentSafetyEndpoint   = $outputs.contentSafetyEndpoint.value
-    foundryProjectName      = $outputs.foundryProjectName.value
-    foundryProjectEndpoint  = $outputs.foundryProjectEndpoint.value
-    openAiDeploymentName    = $outputs.openAiDeploymentName.value
+    foundryProjectName          = $outputs.foundryProjectName.value
+    foundryProjectEndpoint      = $outputs.foundryProjectEndpoint.value
+    openAiDeploymentName        = $outputs.openAiDeploymentName.value
+    appInsightsConnectionString = $outputs.appInsightsConnectionString.value
 }
 $state | ConvertTo-Json -Depth 5 | Set-Content -Path $stateFile -Encoding UTF8
 Write-Host "==> Wrote state file: $stateFile" -ForegroundColor Green

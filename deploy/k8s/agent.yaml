@@ -80,6 +80,8 @@ spec:
             # flows through AZURE_OPENAI_ENDPOINT above.
             - name: FOUNDRY_PROJECT_ENDPOINT
               value: "__FOUNDRY_PROJECT_ENDPOINT__"
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              value: "__APPINSIGHTS_CONNECTION_STRING__"
           readinessProbe:
             httpGet:
               path: /health

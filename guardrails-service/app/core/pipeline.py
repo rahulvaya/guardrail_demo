@@ -108,7 +108,19 @@ class GuardrailPipeline:
         return await self._run(self._input_guards, text, GuardStage.INPUT, context)
 
     async def check_tool_input(self, text: str, *, context: dict[str, Any] | None = None) -> PipelineResult:
-        return await self._run(self._tool_input_guards, text, GuardStage.TOOL_INPUT, context)
+        # Auto-extract tool_name from {"tool": "...", "arguments": {...}} so guards
+        # (schema-enforcement, azure-task-adherence) can read context["tool_name"]
+        # without re-parsing the text themselves.
+        import json as _json  # local import to avoid top-level circular risk
+        ctx: dict[str, Any] = dict(context or {})
+        if "tool_name" not in ctx:
+            try:
+                payload = _json.loads(text)
+                if isinstance(payload, dict) and isinstance(payload.get("tool"), str):
+                    ctx["tool_name"] = payload["tool"]
+            except Exception:
+                pass
+        return await self._run(self._tool_input_guards, text, GuardStage.TOOL_INPUT, ctx)
 
     async def check_output(self, text: str, *, context: dict[str, Any] | None = None) -> PipelineResult:
         return await self._run(self._output_guards, text, GuardStage.OUTPUT, context)

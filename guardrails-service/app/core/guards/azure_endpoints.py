@@ -29,6 +29,9 @@ from __future__ import annotations
 # ---------------------------------------------------------------------------
 
 CONTENT_SAFETY_API_VERSION = "2024-09-01"
+# detectTaskAdherence was added in the 2025-03-01 release; the 2024-09-01
+# endpoint returns 404 for this operation.
+CONTENT_SAFETY_API_VERSION_TASK_ADHERENCE = "2025-03-01"
 LANGUAGE_API_VERSION = "2023-04-01"
 
 # ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ from . import (
     bias_detect,              # noqa: F401  (stereotype / demographic skew)
     competitor_mentions,      # noqa: F401
     groundedness,             # noqa: F401  (RAG hallucination check)
-    output_pii_redact,        # noqa: F401
+    # output_pii_redact removed — use pii-detect with mode: sanitize on output stage
     pii_detect,               # noqa: F401
     prompt_injection,         # noqa: F401
     schema_enforcement,       # noqa: F401  (JSON Schema validation of tool calls)

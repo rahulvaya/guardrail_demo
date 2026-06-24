@@ -1,4 +1,4 @@
-"""pii-detect: flag PII in INPUT.
+"""pii-detect: flag PII in INPUT or OUTPUT.
 
 Default engine: **Microsoft Presidio** (https://github.com/microsoft/presidio).
 Falls back to a regex engine when ``presidio-analyzer`` is not installed
@@ -11,7 +11,7 @@ mentions an email address. Switch to BLOCK by setting
 
 Configuration keys (policy YAML or ``GUARD_PII_DETECT_CONFIG`` JSON):
     engine          "presidio" (default) | "regex"
-    mode            "sanitize" (default) | "block"
+    mode            "sanitize" (default) | "block" | "redact_and_block"
     language        Presidio language code (default: "en")
     min_score       Float in [0, 1]; entities below this are ignored
                     when engine == "presidio" (default: 0.4)
@@ -34,21 +34,28 @@ from ..base import Guard, GuardCheckResult, GuardDecision, GuardStage
 from ..observability import obs_log
 from ..registry import register_guard
 
-# Conservative regex set used when Presidio is unavailable or disabled.
+# ---------------------------------------------------------------------------
+# Regex fallback / supplement patterns
+# ---------------------------------------------------------------------------
+
 DEFAULT_PATTERNS: dict[str, dict[str, str]] = {
-    "email":       {"regex": r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b", "mask": "<EMAIL>"},
-    "ssn":         {"regex": r"\b\d{3}-\d{2}-\d{4}\b", "mask": "<SSN>"},
-    "credit-card": {"regex": r"\b(?:\d[ -]?){13,19}\b", "mask": "<CARD>"},
-    # US phone: matches both formatted ((123) 456-7890, +1-234-567-8900) and
-    # bare 10-digit (1234567890) variants. The bare form requires word
-    # boundaries so it doesn't gobble unrelated long digit runs.
+    "email":       {"regex": r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b",                    "mask": "<EMAIL>"},
+    "ssn":         {"regex": r"\b\d{3}-\d{2}-\d{4}\b",                           "mask": "<SSN>"},
+    "credit-card": {"regex": r"\b(?:\d[ -]?){13,19}\b",                          "mask": "<CARD>"},
+    # US phone: handles +1-xxx, (xxx) xxx-xxxx, and bare 10-digit forms.
     "us-phone":    {"regex": r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b", "mask": "<PHONE>"},
-    "ipv4":        {"regex": r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "mask": "<IP>"},
-    "iban":        {"regex": r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b", "mask": "<IBAN>"},
+    # International phone: +CC followed by 6-14 digits/separators.
+    "intl-phone":  {"regex": r"\+\d{1,3}[\s\-.][ \d\s\-.]{6,}\d",               "mask": "<PHONE>"},
+    "ipv4":        {"regex": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",                     "mask": "<IP>"},
+    "iban":        {"regex": r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b",                "mask": "<IBAN>"},
+    "date-iso":    {"regex": r"\b\d{4}-\d{2}-\d{2}\b",                           "mask": "<DATE>"},
 }
 
 
-def _compile_patterns(spec: dict[str, Any]) -> list[tuple[str, re.Pattern[str], str]]:
+def _compile_patterns(
+    spec: dict[str, Any],
+    guard_name: str = "pii-detect",
+) -> list[tuple[str, re.Pattern[str], str]]:
     out: list[tuple[str, re.Pattern[str], str]] = []
     for label, entry in (spec or {}).items():
         try:
@@ -66,11 +73,72 @@ def _compile_patterns(spec: dict[str, Any]) -> list[tuple[str, re.Pattern[str], 
             obs_log(
                 "guard.regex_invalid",
                 level="warning",
-                guard="pii-detect",
+                guard=guard_name,
                 label=str(label),
                 error=str(exc),
             )
     return out
+
+
+def _build_presidio_engine(
+    language: str = "en",
+    spacy_model: str = "en_core_web_sm",
+) -> Any:
+    from presidio_analyzer import AnalyzerEngine  # type: ignore
+    from presidio_analyzer.nlp_engine import NlpEngineProvider  # type: ignore
+
+    provider = NlpEngineProvider(
+        nlp_configuration={
+            "nlp_engine_name": "spacy",
+            "models": [{"lang_code": language, "model_name": spacy_model}],
+        }
+    )
+    nlp_engine = provider.create_engine()
+    return AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=[language])
+
+
+def _analyze_and_redact(
+    text: str,
+    *,
+    presidio_engine: Any | None,
+    patterns: list[tuple[str, re.Pattern[str], str]],
+    language: str = "en",
+    min_score: float = 0.4,
+    entities: list[str] | None = None,
+) -> tuple[str, list[str], list[str]]:
+    presidio_results: list[Any] = []
+    if presidio_engine is not None:
+        kwargs: dict[str, Any] = {"text": text, "language": language}
+        if entities:
+            kwargs["entities"] = entities
+        all_results = presidio_engine.analyze(**kwargs)
+        presidio_results = [r for r in all_results if getattr(r, "score", 0.0) >= min_score]
+
+    # Apply Presidio replacements (reverse order to preserve offsets).
+    sanitized = text
+    for r in sorted(presidio_results, key=lambda r: r.start, reverse=True):
+        sanitized = sanitized[: r.start] + f"<{r.entity_type}>" + sanitized[r.end :]
+
+    # Apply regex supplement on top.
+    regex_found: list[str] = []
+    for label, pat, mask in (patterns or []):
+        new, n = pat.subn(mask, sanitized)
+        if n > 0:
+            regex_found.append(f"{label} x{n}")
+            sanitized = new
+
+    if not presidio_results and not regex_found:
+        return text, [], []
+
+    reasons = (
+        [f"{r.entity_type} (score={r.score:.2f})" for r in presidio_results]
+        + regex_found
+    )
+    categories = (
+        [f"pii.{r.entity_type.lower()}" for r in presidio_results]
+        + [f"pii.{f.split()[0]}" for f in regex_found]
+    )
+    return sanitized, reasons, categories
 
 
 class PiiDetectGuard(Guard):
@@ -92,12 +160,12 @@ class PiiDetectGuard(Guard):
         extra = config.get("extra_patterns") or {}
         if isinstance(extra, dict):
             raw.update(extra)
-        self._patterns: list[tuple[str, re.Pattern[str], str]] = _compile_patterns(raw)
+        self._patterns = _compile_patterns(raw)
 
         self._presidio: Any = None
         if self.engine == "presidio":
             try:
-                self._presidio = self._build_presidio_engine()
+                self._presidio = _build_presidio_engine(self.language, self.spacy_model)
                 obs_log(
                     "guard.engine_ready",
                     guard="pii-detect",
@@ -118,91 +186,21 @@ class PiiDetectGuard(Guard):
                 )
                 self.engine = "regex"
 
-    def _build_presidio_engine(self) -> Any:
-        """Build a Presidio AnalyzerEngine bound to the configured spaCy model.
-
-        Presidio's default config asks for ``en_core_web_lg``. We bind to
-        whichever model the operator configured (default: small) so the
-        analyzer doesn't error out at startup when only that model is
-        installed.
-        """
-        from presidio_analyzer import AnalyzerEngine  # type: ignore
-        from presidio_analyzer.nlp_engine import NlpEngineProvider  # type: ignore
-
-        provider = NlpEngineProvider(
-            nlp_configuration={
-                "nlp_engine_name": "spacy",
-                "models": [{"lang_code": self.language, "model_name": self.spacy_model}],
-            }
-        )
-        nlp_engine = provider.create_engine()
-        return AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=[self.language])
-
     async def check(self, text: str, *, context: dict[str, Any] | None = None) -> GuardCheckResult:
-        if self.engine == "presidio" and self._presidio is not None:
-            return self._check_presidio(text)
-        return self._check_regex(text)
-
-    def _check_regex(self, text: str) -> GuardCheckResult:
-        found: list[str] = []
-        sanitized = text
-        for label, pat, mask in self._patterns:
-            new, n = pat.subn(mask, sanitized)
-            if n > 0:
-                found.append(f"{label} x{n}")
-                sanitized = new
-        if not found:
+        presidio = self._presidio if self.engine == "presidio" else None
+        sanitized, reasons, cats = _analyze_and_redact(
+            text,
+            presidio_engine=presidio,
+            patterns=self._patterns,
+            language=self.language,
+            min_score=self.min_score,
+            entities=self.entities or None,
+        )
+        if not reasons:
             return self._allow(text)
-        cats = [f"pii.{f.split()[0]}" for f in found]
-        if self.mode == "block":
-            return self._block(text, reasons=found, categories=cats)
-        if self.mode == "redact_and_block":
-            return GuardCheckResult(
-                guard_name=self.name,
-                decision=GuardDecision.BLOCK,
-                sanitized_text=sanitized,
-                reasons=found,
-                categories=cats,
-            )
-        return self._sanitize(sanitized, reasons=found, categories=cats)
-
-    def _check_presidio(self, text: str) -> GuardCheckResult:
-        kwargs: dict[str, Any] = {"text": text, "language": self.language}
-        if self.entities:
-            kwargs["entities"] = self.entities
-        results = self._presidio.analyze(**kwargs)  # type: ignore[union-attr]
-        results = [r for r in results if getattr(r, "score", 0.0) >= self.min_score]
-
-        # Supplement Presidio with regex patterns to catch entities that Presidio
-        # under-scores (e.g. phone numbers with invalid area codes score 0.0 in
-        # Presidio because phonenumbers.is_valid_number() returns False).
-        regex_found: list[str] = []
-        regex_sanitized = text
-        if self._patterns:
-            for label, pat, mask in self._patterns:
-                new, n = pat.subn(mask, regex_sanitized)
-                if n > 0:
-                    regex_found.append(f"{label} x{n}")
-                    regex_sanitized = new
-
-        if not results and not regex_found:
-            return self._allow(text)
-
-        # Build sanitized text: start with Presidio replacements then apply regex.
-        sanitized = text
-        for r in sorted(results, key=lambda r: r.start, reverse=True):
-            sanitized = sanitized[: r.start] + f"<{r.entity_type}>" + sanitized[r.end :]
-        if regex_found:
-            for label, pat, mask in self._patterns:
-                sanitized, _ = pat.subn(mask, sanitized)
-
-        reasons = [f"{r.entity_type} (score={r.score:.2f})" for r in results] + regex_found
-        cats = [f"pii.{r.entity_type.lower()}" for r in results] + [f"pii.{f.split()[0]}" for f in regex_found]
         if self.mode == "block":
             return self._block(text, reasons=reasons, categories=cats)
         if self.mode == "redact_and_block":
-            # Sanitize (mask PII) then block — request is rejected but
-            # sanitized_text carries the redacted version for audit.
             return GuardCheckResult(
                 guard_name=self.name,
                 decision=GuardDecision.BLOCK,
